@@ -255,8 +255,45 @@ Also add: `kinds []string` filter param (e.g. `["function", "method"]`) to narro
 | 3c | Granular Kind tags in parser (function/method/class/type/variable/constant) | ~1hr |
 | 3d | `kinds []string` filter on `find_dead_code` and `search_identifiers` | ~30min |
 | 3e | `repomap doctor` command — prints binary path, GOPATH, daemon PID, socket path, registered projects; callable via full path when not in PATH | ~20min |
+| 3f | Index-time ignore improvements — `.gitignore` parsing, `.repomapignore` support, expanded default blocklist, watcher/walker parity | ~1hr |
 
-**Total: ~2.5 hours**
+**Total: ~3.5 hours**
+
+### 3f detail: ignore improvements
+
+**Root cause:** node_modules, .angular/cache, and similar directories contain thousands of TypeScript definition files that all get parsed, tagged, and PageRanked alongside actual project code — polluting the ranked map with noise and blowing past the token budget.
+
+**Current state (as-built):**
+- Project walker hardcodes: `.git`, `node_modules`, `.repomap`, `vendor`, `dist`, `build`
+- Watcher hardcodes: `.git`, `node_modules`, `.repomap`, `vendor` — missing `dist` and `build` (inconsistency)
+- No `.gitignore` parsing. No user-overridable ignore file.
+
+**Changes needed:**
+
+1. **Unify ignore logic** — single `shouldIgnore(path string) bool` function in a shared `internal/ignore` package, used by both the initial walk in `project.go` and the watcher in `watcher.go`. Fixes the `dist`/`build` inconsistency.
+
+2. **Expand default blocklist** — add at minimum:
+   ```
+   .angular        # Angular build cache — thousands of .d.ts files
+   .next           # Next.js build output
+   .nuxt           # Nuxt build output
+   .svelte-kit     # SvelteKit
+   __pycache__     # Python bytecode
+   .pytest_cache
+   .mypy_cache
+   coverage        # test coverage output
+   .nyc_output     # Istanbul/nyc coverage
+   out             # common TS/Next output dir
+   .turbo          # Turborepo cache
+   .cache          # generic catch-all cache dirs
+   *.d.ts          # TypeScript declaration files — generated, not source
+   ```
+
+3. **`.gitignore` parsing** — at project registration, walk up from project root to find all `.gitignore` files (root + subdirs). Parse glob patterns. Apply at index time. This eliminates the need to manually maintain a blocklist for generated output that's already excluded from git.
+
+4. **`.repomapignore`** — optional file in the project root, same glob syntax as `.gitignore`. Lets projects exclude paths that aren't in `.gitignore` (e.g. a `fixtures/` dir full of large JSON test files). Checked before `.gitignore`.
+
+5. **`map_tokens` note** — even with ignore in place, large projects can overflow the default 8192 token budget. Document that `map_tokens` is the escape valve and that callers should pipe output through `ttok` to verify actual size.
 
 ---
 
