@@ -223,6 +223,42 @@ No new dependencies required. The diff parser is straightforward enough for stdl
 
 ---
 
+## Phase 3 — Planned: Dead Code Filter Improvements
+
+Follow-on to Phase 2 based on observed behavior: `find_dead_code` returns many false positives from exported symbols that appear unreferenced within the project but are part of the public API or called externally.
+
+### Changes to `find_dead_code`
+
+Add two new params:
+
+| Param | Type | Default | Effect |
+|-------|------|---------|--------|
+| `unexported_only` | bool | false | Only return symbols whose name starts with a lowercase letter (Go), `_` prefix (Python), or equivalent per-language unexported convention. These can only be called within their package — if unused there, genuinely dead. |
+| `exported_only` | bool | false | Only return exported symbols. Useful for auditing public API surface that may have been abandoned. Caller should understand false positive rate is high. |
+
+Both default false = current behavior (all symbols). Mutually exclusive — return error if both set.
+
+Add per-language unexported detection to `internal/graph/graph.go`:
+- Go: `name[0] >= 'a' && name[0] <= 'z'`
+- Python: name starts with `_` but not `__` (dunder methods are framework-called)
+- TypeScript/JS: no enforced convention — skip filter for these languages, or treat leading `_` as unexported by convention
+- Rust: items without `pub` keyword — would require AST-level visibility info not currently in tags; skip for now, document limitation
+
+Also add: `kinds []string` filter param (e.g. `["function", "method"]`) to narrow result to specific symbol types. Requires tagging Kind more granularly than just "def"/"ref" — that's a parser change.
+
+### Sub-phase plan
+
+| Sub-phase | Scope | Est. |
+|-----------|-------|------|
+| 3a | Add `unexported_only` + `exported_only` params to `find_dead_code` | ~30min |
+| 3b | Per-language unexported detection in graph package | ~30min |
+| 3c | Granular Kind tags in parser (function/method/class/type/variable/constant) | ~1hr |
+| 3d | `kinds []string` filter on `find_dead_code` and `search_identifiers` | ~30min |
+
+**Total: ~2.5 hours**
+
+---
+
 ## Prerequisites
 
 ```bash
