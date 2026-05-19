@@ -254,6 +254,7 @@ Also add: `kinds []string` filter param (e.g. `["function", "method"]`) to narro
 | 3b | Per-language unexported detection in graph package | ~30min |
 | 3c | Granular Kind tags in parser (function/method/class/type/variable/constant) | ~1hr |
 | 3d | `kinds []string` filter on `find_dead_code` and `search_identifiers` | ~30min |
+| 3e | `repomap doctor` command — prints binary path, GOPATH, daemon PID, socket path, registered projects; callable via full path when not in PATH | ~20min |
 
 **Total: ~2.5 hours**
 
