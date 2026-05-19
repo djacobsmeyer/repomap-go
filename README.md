@@ -36,12 +36,76 @@ Claude Code (per project, STDIO):
 
 ```jsonc
 // GET localhost:7374/events?project=<path>  (omit filter = all projects)
-{ "ts": "...", "project": "~/code/api", "type": "file_changed",    "file": "src/server.ts" }
+{ "ts": "...", "project": "~/code/api", "type": "file_changed",     "file": "src/server.ts" }
 { "ts": "...", "project": "~/code/api", "type": "reindex_started",  "files_changed": 3 }
 { "ts": "...", "project": "~/code/api", "type": "reindex_complete", "duration_ms": 42, "tags": 1840 }
 { "ts": "...", "project": "~/code/api", "type": "cache_hit",        "file": "src/db.ts" }
 { "ts": "...", "project": "~/code/api", "type": "mcp_call",         "tool": "repo_map", "tokens": 3200 }
 { "ts": "...", "project": "~/code/api", "type": "project_idle",     "evicted": false }
+```
+
+### Subscribing to the event stream
+
+**CLI — pretty-printed, ANSI colours:**
+```bash
+repomap events                                    # all projects
+repomap events --project ~/code/api              # one project
+```
+
+**curl — raw SSE, all projects:**
+```bash
+curl -N http://localhost:7374/events
+```
+
+**curl — filtered to one project:**
+```bash
+curl -N "http://localhost:7374/events?project=$(pwd)"
+```
+
+**jq pipeline — watch reindex timing:**
+```bash
+curl -sN http://localhost:7374/events \
+  | grep --line-buffered '"type"' \
+  | jq -R 'fromjson | select(.type == "reindex_complete") | {project: .project, ms: .duration_ms, tags: .tags}'
+```
+
+**Shell trigger — verify a file change fires events:**
+```bash
+# Terminal 1
+curl -N http://localhost:7374/events
+
+# Terminal 2
+touch ~/code/api/src/server.ts
+# Expect: file_changed → reindex_started → reindex_complete (2–10ms)
+# Second touch of same file: cache_hit → reindex_complete (0ms)
+```
+
+**Node.js / TypeScript client:**
+```typescript
+const res = await fetch('http://localhost:7374/events?project=/your/project')
+const reader = res.body!.getReader()
+const decoder = new TextDecoder()
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  const lines = decoder.decode(value).split('\n')
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      const event = JSON.parse(line.slice(6))
+      console.log(event.type, event)
+    }
+  }
+}
+```
+
+**Python client:**
+```python
+import httpx, json
+with httpx.stream('GET', 'http://localhost:7374/events') as r:
+    for line in r.iter_lines():
+        if line.startswith('data: '):
+            event = json.loads(line[6:])
+            print(event['type'], event)
 ```
 
 ## Project structure
