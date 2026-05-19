@@ -43,10 +43,10 @@ func Build(tagsByFile map[string][]parser.Tag) *FileGraph {
 				b = &symBucket{defs: map[string]struct{}{}, refs: map[string]struct{}{}}
 				buckets[t.Name] = b
 			}
-			if t.Kind == "def" {
-				b.defs[file] = struct{}{}
-			} else if t.Kind == "ref" {
+			if t.Kind == "ref" {
 				b.refs[file] = struct{}{}
+			} else {
+				b.defs[file] = struct{}{}
 			}
 		}
 	}
@@ -183,7 +183,7 @@ func RenderMap(ranks map[string]float32, tagsByFile map[string][]parser.Tag, tok
 		// Filter to defs only, stable line order.
 		var defs []parser.Tag
 		for _, t := range tags {
-			if t.Kind == "def" {
+			if t.IsDef() {
 				defs = append(defs, t)
 			}
 		}
@@ -252,7 +252,7 @@ func BlastRadius(g *FileGraph, tagsByFile map[string][]parser.Tag, symbol, file 
 			continue
 		}
 		for i, t := range tags {
-			if t.Name == symbol && t.Kind == "def" {
+			if t.Name == symbol && t.IsDef() {
 				if _, ok := seedSet[f]; !ok {
 					seedSet[f] = struct{}{}
 					seedFiles = append(seedFiles, f)
@@ -375,9 +375,45 @@ type OrphanFile struct {
 	Rank float32 `json:"rank"`
 }
 
+// isUnexported reports whether `name` follows the language's convention for
+// an unexported / private symbol. Returns false for languages without an
+// enforced visibility convention (so the filter is effectively skipped).
+func isUnexported(name, lang string) bool {
+	if name == "" {
+		return false
+	}
+	switch lang {
+	case "go":
+		c := name[0]
+		return c >= 'a' && c <= 'z'
+	case "python":
+		// Leading _ but NOT dunder (__name__ etc, called by framework).
+		return strings.HasPrefix(name, "_") && !strings.HasPrefix(name, "__")
+	case "typescript", "javascript":
+		// No enforced convention — treat leading _ as unexported by convention.
+		return strings.HasPrefix(name, "_")
+	}
+	return false
+}
+
 // FindDeadCode returns symbols defined but never referenced, plus files with
 // no inbound edges and PageRank at or below minRank.
-func FindDeadCode(g *FileGraph, tagsByFile map[string][]parser.Tag, ranks map[string]float32, minRank float32) DeadCodeResult {
+//
+// Filters:
+//   - unexportedOnly: keep only symbols whose name looks unexported in their
+//     language (best signal-to-noise — externally-called code is invisible).
+//   - exportedOnly:   keep only symbols that don't look unexported. Mutually
+//     exclusive with unexportedOnly; if both are true, no symbols are kept.
+//   - kinds: if non-empty, keep only symbols whose Kind is in this slice.
+func FindDeadCode(
+	g *FileGraph,
+	tagsByFile map[string][]parser.Tag,
+	ranks map[string]float32,
+	minRank float32,
+	unexportedOnly bool,
+	exportedOnly bool,
+	kinds []string,
+) DeadCodeResult {
 	referenced := map[string]struct{}{}
 	for _, tags := range tagsByFile {
 		for _, t := range tags {
@@ -386,6 +422,14 @@ func FindDeadCode(g *FileGraph, tagsByFile map[string][]parser.Tag, ranks map[st
 			}
 		}
 	}
+
+	kindSet := map[string]struct{}{}
+	for _, k := range kinds {
+		if k != "" {
+			kindSet[k] = struct{}{}
+		}
+	}
+	mutualExclusion := unexportedOnly && exportedOnly
 
 	var dead []DeadSymbol
 	files := make([]string, 0, len(tagsByFile))
@@ -400,10 +444,25 @@ func FindDeadCode(g *FileGraph, tagsByFile map[string][]parser.Tag, ranks map[st
 		copy(ordered, tags)
 		sort.Slice(ordered, func(i, j int) bool { return ordered[i].Line < ordered[j].Line })
 		for _, t := range ordered {
-			if t.Kind != "def" {
+			if !t.IsDef() {
 				continue
 			}
 			if _, ok := referenced[t.Name]; ok {
+				continue
+			}
+			if len(kindSet) > 0 {
+				if _, ok := kindSet[t.Kind]; !ok {
+					continue
+				}
+			}
+			if mutualExclusion {
+				// Both flags set — silently include nothing.
+				continue
+			}
+			if unexportedOnly && !isUnexported(t.Name, t.Lang) {
+				continue
+			}
+			if exportedOnly && isUnexported(t.Name, t.Lang) {
 				continue
 			}
 			dead = append(dead, DeadSymbol{File: f, Name: t.Name, Line: t.Line, Kind: t.Kind})

@@ -16,6 +16,7 @@ import (
 	"github.com/yourusername/repomap-go/internal/cache"
 	"github.com/yourusername/repomap-go/internal/events"
 	"github.com/yourusername/repomap-go/internal/graph"
+	"github.com/yourusername/repomap-go/internal/ignore"
 	"github.com/yourusername/repomap-go/internal/parser"
 	"github.com/yourusername/repomap-go/internal/watcher"
 )
@@ -31,6 +32,7 @@ type Project struct {
 	cache   *cache.Cache
 	watcher *watcher.Watcher
 	bus     *events.Bus
+	matcher *ignore.Matcher
 
 	lastMCPCall    time.Time
 	lastReindex    time.Time
@@ -93,6 +95,15 @@ func (p *Project) Start(ctx context.Context) error {
 	p.cache = c
 	p.mu.Unlock()
 
+	// Build the ignore matcher before any walking.
+	m, err := ignore.New(p.Root)
+	if err != nil {
+		return fmt.Errorf("ignore matcher: %w", err)
+	}
+	p.mu.Lock()
+	p.matcher = m
+	p.mu.Unlock()
+
 	if err := p.initialIndex(); err != nil {
 		return fmt.Errorf("initial index: %w", err)
 	}
@@ -104,7 +115,7 @@ func (p *Project) Start(ctx context.Context) error {
 		})
 	}
 
-	w, err := watcher.New(p.Root)
+	w, err := watcher.New(p.Root, m)
 	if err != nil {
 		return fmt.Errorf("watcher: %w", err)
 	}
@@ -309,9 +320,12 @@ func (p *Project) initialIndex() error {
 		}
 		rel, _ := filepath.Rel(p.Root, path)
 		if info.IsDir() {
-			if shouldSkipDir(rel) {
+			if rel != "." && p.matcher != nil && p.matcher.ShouldIgnore(path, true) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if p.matcher != nil && p.matcher.ShouldIgnore(path, false) {
 			return nil
 		}
 		if parser.FilenameToLang(rel) == "" {
@@ -333,20 +347,6 @@ func (p *Project) initialIndex() error {
 		}
 		return nil
 	})
-}
-
-func shouldSkipDir(rel string) bool {
-	if rel == "" || rel == "." {
-		return false
-	}
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	for _, p := range parts {
-		switch p {
-		case ".git", "node_modules", ".repomap", "vendor", "dist", "build":
-			return true
-		}
-	}
-	return false
 }
 
 func (p *Project) rebuildGraph() {
@@ -397,7 +397,9 @@ func (p *Project) RepoMap(tokenBudget int, chatFiles []string, forceRefresh bool
 
 // SearchIdentifiers finds tags whose Name contains `query` (case-insensitive).
 // filter: "defs" | "refs" | "both" (default "both").
-func (p *Project) SearchIdentifiers(query, filter string, limit int) []parser.Tag {
+// kinds: optional list of granular kinds (function, method, class, etc.) to
+// restrict results. Empty = no kind filter.
+func (p *Project) SearchIdentifiers(query, filter string, limit int, kinds []string) []parser.Tag {
 	p.ensureHydrated()
 	p.touchMCP()
 	if limit <= 0 {
@@ -407,17 +409,29 @@ func (p *Project) SearchIdentifiers(query, filter string, limit int) []parser.Ta
 		filter = "both"
 	}
 	q := strings.ToLower(query)
+	kindSet := map[string]struct{}{}
+	for _, k := range kinds {
+		if k != "" {
+			kindSet[k] = struct{}{}
+		}
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	var out []parser.Tag
 	for _, tags := range p.index {
 		for _, t := range tags {
-			if filter == "defs" && t.Kind != "def" {
+			isDef := t.IsDef()
+			if filter == "defs" && !isDef {
 				continue
 			}
-			if filter == "refs" && t.Kind != "ref" {
+			if filter == "refs" && isDef {
 				continue
+			}
+			if len(kindSet) > 0 {
+				if _, ok := kindSet[t.Kind]; !ok {
+					continue
+				}
 			}
 			if q == "" || strings.Contains(strings.ToLower(t.Name), q) {
 				out = append(out, t)
@@ -449,7 +463,7 @@ func (p *Project) BlastRadius(symbol, file string, maxDepth int) graph.BlastRadi
 }
 
 // FindDeadCode returns symbols defined but never referenced.
-func (p *Project) FindDeadCode(minRank float32) graph.DeadCodeResult {
+func (p *Project) FindDeadCode(minRank float32, unexportedOnly, exportedOnly bool, kinds []string) graph.DeadCodeResult {
 	p.ensureHydrated()
 	p.touchMCP()
 	p.mu.RLock()
@@ -460,7 +474,7 @@ func (p *Project) FindDeadCode(minRank float32) graph.DeadCodeResult {
 	g := p.graph
 	ranks := p.ranks
 	p.mu.RUnlock()
-	res := graph.FindDeadCode(g, idx, ranks, minRank)
+	res := graph.FindDeadCode(g, idx, ranks, minRank, unexportedOnly, exportedOnly, kinds)
 	if p.bus != nil {
 		p.bus.Emit(p.Root, "mcp_call", map[string]interface{}{"tool": "find_dead_code"})
 	}

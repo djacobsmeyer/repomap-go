@@ -22,9 +22,9 @@ const MCPVersion = "2024-11-05"
 // Defined here to avoid importing internal/project (which would cycle).
 type ProjectAccessor interface {
 	RepoMap(tokenBudget int, chatFiles []string, forceRefresh bool) string
-	SearchIdentifiers(query, filter string, limit int) []parser.Tag
+	SearchIdentifiers(query, filter string, limit int, kinds []string) []parser.Tag
 	BlastRadius(symbol, file string, maxDepth int) graph.BlastRadiusResult
-	FindDeadCode(minRank float32) graph.DeadCodeResult
+	FindDeadCode(minRank float32, unexportedOnly, exportedOnly bool, kinds []string) graph.DeadCodeResult
 	ChangedSymbols(diff, gitRef string, includeBlastRadius bool) graph.ChangedSymbolsResult
 }
 
@@ -165,6 +165,7 @@ func (s *Server) toolsList() []map[string]any {
 					"query":        map[string]any{"type": "string"},
 					"filter":       map[string]any{"type": "string", "enum": []string{"defs", "refs", "both"}, "default": "both"},
 					"limit":        map[string]any{"type": "integer", "default": 50},
+					"kinds":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Filter by symbol kind: function, method, class, interface, type, variable, constant, def, ref"},
 				},
 				"required": []string{"project_root", "query"},
 			},
@@ -189,8 +190,11 @@ func (s *Server) toolsList() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"project_root": map[string]any{"type": "string"},
-					"min_rank":     map[string]any{"type": "number", "default": 0.001, "description": "Exclude files below this PageRank (entry points and scripts legitimately have no callers)"},
+					"project_root":    map[string]any{"type": "string"},
+					"min_rank":        map[string]any{"type": "number", "default": 0.001, "description": "Exclude files below this PageRank (entry points and scripts legitimately have no callers)"},
+					"unexported_only": map[string]any{"type": "boolean", "default": false, "description": "Only return unexported/private symbols. Best signal-to-noise for actionable dead code."},
+					"exported_only":   map[string]any{"type": "boolean", "default": false, "description": "Only return exported/public symbols. High false-positive rate — external callers are invisible to static analysis."},
+					"kinds":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Filter by symbol kind: function, method, class, interface, type, variable, constant, def, ref"},
 				},
 				"required": []string{"project_root"},
 			},
@@ -274,8 +278,11 @@ func (s *Server) toolBlastRadius(raw json.RawMessage) (any, *RPCError) {
 }
 
 type findDeadCodeArgs struct {
-	ProjectRoot string  `json:"project_root"`
-	MinRank     float32 `json:"min_rank"`
+	ProjectRoot    string   `json:"project_root"`
+	MinRank        float32  `json:"min_rank"`
+	UnexportedOnly bool     `json:"unexported_only"`
+	ExportedOnly   bool     `json:"exported_only"`
+	Kinds          []string `json:"kinds"`
 }
 
 func (s *Server) toolFindDeadCode(raw json.RawMessage) (any, *RPCError) {
@@ -288,10 +295,13 @@ func (s *Server) toolFindDeadCode(raw json.RawMessage) (any, *RPCError) {
 	if err := s.validateRoot(args.ProjectRoot); err != nil {
 		return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
 	}
+	if args.UnexportedOnly && args.ExportedOnly {
+		return nil, &RPCError{Code: codeInvalidParams, Message: "unexported_only and exported_only are mutually exclusive"}
+	}
 	if args.MinRank == 0 {
 		args.MinRank = 0.001
 	}
-	res := s.project.FindDeadCode(args.MinRank)
+	res := s.project.FindDeadCode(args.MinRank, args.UnexportedOnly, args.ExportedOnly, args.Kinds)
 	body, err := json.Marshal(res)
 	if err != nil {
 		return nil, &RPCError{Code: codeInternalError, Message: err.Error()}
@@ -356,10 +366,11 @@ func (s *Server) toolRepoMap(raw json.RawMessage) (any, *RPCError) {
 }
 
 type searchArgs struct {
-	ProjectRoot string `json:"project_root"`
-	Query       string `json:"query"`
-	Filter      string `json:"filter"`
-	Limit       int    `json:"limit"`
+	ProjectRoot string   `json:"project_root"`
+	Query       string   `json:"query"`
+	Filter      string   `json:"filter"`
+	Limit       int      `json:"limit"`
+	Kinds       []string `json:"kinds"`
 }
 
 func (s *Server) toolSearchIdentifiers(raw json.RawMessage) (any, *RPCError) {
@@ -378,7 +389,7 @@ func (s *Server) toolSearchIdentifiers(raw json.RawMessage) (any, *RPCError) {
 	if args.Limit <= 0 {
 		args.Limit = 50
 	}
-	tags := s.project.SearchIdentifiers(args.Query, args.Filter, args.Limit)
+	tags := s.project.SearchIdentifiers(args.Query, args.Filter, args.Limit, args.Kinds)
 	body, err := json.Marshal(tags)
 	if err != nil {
 		return nil, &RPCError{Code: codeInternalError, Message: err.Error()}

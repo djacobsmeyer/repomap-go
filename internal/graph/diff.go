@@ -130,7 +130,7 @@ func ChangedSymbols(tagsByFile map[string][]parser.Tag, diff map[string][]LineRa
 		copy(ordered, tags)
 		sort.Slice(ordered, func(i, j int) bool { return ordered[i].Line < ordered[j].Line })
 		for _, t := range ordered {
-			if t.Kind != "def" {
+			if !t.IsDef() {
 				continue
 			}
 			if !inAnyRange(t.Line, ranges) {

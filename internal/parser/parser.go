@@ -18,8 +18,18 @@ type Tag struct {
 	RelFile string `json:"rel_file"`
 	Line    int    `json:"line"`
 	Name    string `json:"name"`
-	Kind    string `json:"kind"` // "def" or "ref"
+	// Kind is one of: "function", "method", "class", "interface",
+	// "type", "variable", "constant" for definitions; "ref" for references;
+	// or "def" as a fallback for definitions whose specific kind isn't known.
+	Kind string `json:"kind"`
+	// Lang is the tree-sitter language identifier (e.g. "go", "python",
+	// "typescript", "javascript"). Empty if unknown.
+	Lang string `json:"lang,omitempty"`
 }
+
+// IsDef reports whether the tag represents a definition (any kind other than
+// "ref"). Centralizes the def/ref distinction now that Kind has many values.
+func (t Tag) IsDef() bool { return t.Kind != "ref" }
 
 // FilenameToLang returns the tree-sitter language identifier for a file path,
 // or empty string if unsupported / explicitly skipped.
@@ -92,6 +102,23 @@ const pyQuery = `
 (call function: (identifier) @name.reference.call)
 (call function: (attribute attribute: (identifier) @name.reference.call))
 `
+
+// kindFromCapture maps tree-sitter capture names like
+// "name.definition.function" to our granular Kind values.
+// Unknown definition kinds fall back to "def" for backward compatibility.
+func kindFromCapture(capName string) string {
+	const prefix = "name.definition."
+	if !strings.HasPrefix(capName, prefix) {
+		return "def"
+	}
+	sub := capName[len(prefix):]
+	switch sub {
+	case "function", "method", "class", "interface",
+		"type", "variable", "constant":
+		return sub
+	}
+	return "def"
+}
 
 func languageAndQuery(lang string) (*sitter.Language, string, bool) {
 	switch lang {
@@ -167,7 +194,7 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			capName := q.CaptureNameForId(cap.Index)
 			kind := ""
 			if strings.HasPrefix(capName, "name.definition") {
-				kind = "def"
+				kind = kindFromCapture(capName)
 			} else if strings.HasPrefix(capName, "name.reference") {
 				kind = "ref"
 			} else {
@@ -186,6 +213,7 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 				Line:    int(node.StartPoint().Row) + 1,
 				Name:    name,
 				Kind:    kind,
+				Lang:    lang,
 			})
 		}
 	}

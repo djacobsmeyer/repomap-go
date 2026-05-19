@@ -37,6 +37,7 @@ func main() {
 	root.AddCommand(listCmd())
 	root.AddCommand(mcpCmd())
 	root.AddCommand(eventsCmd())
+	root.AddCommand(doctorCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -361,6 +362,78 @@ func intFromAny(v interface{}) int {
 		return int(x)
 	}
 	return 0
+}
+
+// --- doctor ------------------------------------------------------------------
+
+func doctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Print diagnostic info: binary path, GOPATH, daemon state, registered projects",
+		RunE: func(c *cobra.Command, args []string) error {
+			runDoctor()
+			return nil
+		},
+	}
+}
+
+func runDoctor() {
+	// binary path
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		exe = "(unknown)"
+	}
+
+	// GOPATH
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			gopath = filepath.Join(home, "go")
+		} else {
+			gopath = "(unknown)"
+		}
+	}
+
+	// daemon
+	pid, alive := daemon.IsRunning(pidPath)
+	daemonState := "not running"
+	if alive {
+		daemonState = fmt.Sprintf("running (pid %d)", pid)
+	}
+
+	// socket
+	socketState := socketPath + " (not found)"
+	if _, statErr := os.Stat(socketPath); statErr == nil {
+		socketState = socketPath + " (exists)"
+	}
+
+	fmt.Printf("binary:   %s\n", exe)
+	fmt.Printf("GOPATH:   %s\n", gopath)
+	fmt.Printf("daemon:   %s\n", daemonState)
+	fmt.Printf("socket:   %s\n", socketState)
+
+	if !alive {
+		fmt.Println("projects: (daemon not running)")
+		return
+	}
+
+	resp, err := daemon.SendMessage(socketPath, daemon.Message{Type: "list"})
+	if err != nil || !resp.OK {
+		fmt.Printf("projects: (could not query daemon: %v)\n", err)
+		return
+	}
+	var projects []map[string]interface{}
+	_ = json.Unmarshal(resp.Data, &projects)
+	fmt.Printf("projects: %d registered\n", len(projects))
+	for _, p := range projects {
+		root, _ := p["root"].(string)
+		lastMCP, _ := p["last_mcp_call"].(string)
+		state := "active"
+		if isProjectIdle(lastMCP) {
+			state = "idle"
+		}
+		fmt.Printf("  %-40s  %s\n", root, state)
+	}
 }
 
 // --- mcp / events ------------------------------------------------------------

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/yourusername/repomap-go/internal/ignore"
 )
 
 // Watcher recursively watches a directory tree and emits debounced batches of
@@ -15,6 +17,7 @@ import (
 type Watcher struct {
 	fw       *fsnotify.Watcher
 	root     string
+	matcher  *ignore.Matcher
 	eventsCh chan []string
 	done     chan struct{}
 	once     sync.Once
@@ -47,8 +50,10 @@ func (w *Watcher) isPaused() bool {
 // Events returns the receive-only batch channel.
 func (w *Watcher) Events() <-chan []string { return w.eventsCh }
 
-// New creates a new recursive watcher rooted at `root`.
-func New(root string) (*Watcher, error) {
+// New creates a new recursive watcher rooted at `root` using the given
+// ignore matcher. The matcher may be nil — in which case only the trivial
+// .db-shard filter applies.
+func New(root string, m *ignore.Matcher) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -56,6 +61,7 @@ func New(root string) (*Watcher, error) {
 	w := &Watcher{
 		fw:       fw,
 		root:     root,
+		matcher:  m,
 		eventsCh: make(chan []string, 8),
 		done:     make(chan struct{}),
 	}
@@ -68,16 +74,17 @@ func New(root string) (*Watcher, error) {
 }
 
 // isIgnored returns true for paths the watcher should ignore.
-func isIgnored(rel string) bool {
+// absPath is the full filesystem path; isDir indicates directory-ness.
+func (w *Watcher) isIgnored(absPath string, isDir bool) bool {
+	rel, err := filepath.Rel(w.root, absPath)
+	if err != nil {
+		return false
+	}
 	if rel == "" || rel == "." {
 		return false
 	}
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	for _, p := range parts {
-		switch p {
-		case ".git", "node_modules", ".repomap", "vendor":
-			return true
-		}
+	if w.matcher != nil && w.matcher.ShouldIgnore(absPath, isDir) {
+		return true
 	}
 	base := filepath.Base(rel)
 	if strings.HasSuffix(base, ".db") || strings.HasSuffix(base, ".db-wal") || strings.HasSuffix(base, ".db-shm") {
@@ -95,8 +102,7 @@ func (w *Watcher) addRecursive(root string) error {
 		if !info.IsDir() {
 			return nil
 		}
-		rel, _ := filepath.Rel(root, path)
-		if isIgnored(rel) {
+		if w.isIgnored(path, true) {
 			return filepath.SkipDir
 		}
 		_ = w.fw.Add(path)
@@ -145,18 +151,19 @@ func (w *Watcher) run() {
 			if err != nil {
 				continue
 			}
-			if isIgnored(rel) {
+			// Stat once — we need both the type and ignore check.
+			info, statErr := os.Stat(ev.Name)
+			isDir := statErr == nil && info.IsDir()
+			if w.isIgnored(ev.Name, isDir) {
 				continue
 			}
 			// If a directory was created, start watching it.
-			if ev.Op&fsnotify.Create == fsnotify.Create {
-				if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-					_ = w.addRecursive(ev.Name)
-					continue
-				}
+			if ev.Op&fsnotify.Create == fsnotify.Create && isDir {
+				_ = w.addRecursive(ev.Name)
+				continue
 			}
 			// Only emit file paths.
-			if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
+			if isDir {
 				continue
 			}
 			pending[rel] = struct{}{}
