@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/yourusername/repomap-go/internal/daemon"
+	"github.com/djacobsmeyer/repomap-go/internal/daemon"
 )
 
 // Run is the entry point. It blocks until either end closes.

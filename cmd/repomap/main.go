@@ -16,8 +16,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yourusername/repomap-go/internal/daemon"
-	"github.com/yourusername/repomap-go/internal/proxy"
+	"github.com/djacobsmeyer/repomap-go/internal/daemon"
+	"github.com/djacobsmeyer/repomap-go/internal/proxy"
 )
 
 const (

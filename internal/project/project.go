@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourusername/repomap-go/internal/cache"
-	"github.com/yourusername/repomap-go/internal/events"
-	"github.com/yourusername/repomap-go/internal/graph"
-	"github.com/yourusername/repomap-go/internal/ignore"
-	"github.com/yourusername/repomap-go/internal/parser"
-	"github.com/yourusername/repomap-go/internal/watcher"
+	"github.com/djacobsmeyer/repomap-go/internal/cache"
+	"github.com/djacobsmeyer/repomap-go/internal/events"
+	"github.com/djacobsmeyer/repomap-go/internal/graph"
+	"github.com/djacobsmeyer/repomap-go/internal/ignore"
+	"github.com/djacobsmeyer/repomap-go/internal/parser"
+	"github.com/djacobsmeyer/repomap-go/internal/watcher"
 )
 
 // Project owns a single repository's index, graph, watcher and MCP socket.

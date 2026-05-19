@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yourusername/repomap-go/internal/parser"
+	"github.com/djacobsmeyer/repomap-go/internal/parser"
 )
 
 // ChangedSymbolsResult is the result for the get_changed_symbols MCP tool.

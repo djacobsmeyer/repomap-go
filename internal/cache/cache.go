@@ -11,7 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/yourusername/repomap-go/internal/parser"
+	"github.com/djacobsmeyer/repomap-go/internal/parser"
 )
 
 // Cache is a per-project on-disk tag cache.

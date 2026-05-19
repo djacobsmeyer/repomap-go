@@ -11,8 +11,8 @@ import (
 	"net"
 	"path/filepath"
 
-	"github.com/yourusername/repomap-go/internal/graph"
-	"github.com/yourusername/repomap-go/internal/parser"
+	"github.com/djacobsmeyer/repomap-go/internal/graph"
+	"github.com/djacobsmeyer/repomap-go/internal/parser"
 )
 
 // MCPVersion is the protocol version advertised in initialize responses.

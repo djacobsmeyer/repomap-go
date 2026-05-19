@@ -15,9 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yourusername/repomap-go/internal/events"
-	"github.com/yourusername/repomap-go/internal/mcp"
-	"github.com/yourusername/repomap-go/internal/project"
+	"github.com/djacobsmeyer/repomap-go/internal/events"
+	"github.com/djacobsmeyer/repomap-go/internal/mcp"
+	"github.com/djacobsmeyer/repomap-go/internal/project"
 )
 
 const (

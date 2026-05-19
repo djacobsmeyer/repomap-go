@@ -1,4 +1,4 @@
-module github.com/yourusername/repomap-go
+module github.com/djacobsmeyer/repomap-go
 
 go 1.22
 

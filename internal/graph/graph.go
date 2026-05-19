@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yourusername/repomap-go/internal/parser"
+	"github.com/djacobsmeyer/repomap-go/internal/parser"
 )
 
 // FileGraph models references between files via shared symbol names.

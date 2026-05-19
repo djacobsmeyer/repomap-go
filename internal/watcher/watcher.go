@@ -9,7 +9,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/yourusername/repomap-go/internal/ignore"
+	"github.com/djacobsmeyer/repomap-go/internal/ignore"
 )
 
 // Watcher recursively watches a directory tree and emits debounced batches of
