@@ -11,6 +11,7 @@ import (
 	"net"
 	"path/filepath"
 
+	"github.com/yourusername/repomap-go/internal/graph"
 	"github.com/yourusername/repomap-go/internal/parser"
 )
 
@@ -22,6 +23,9 @@ const MCPVersion = "2024-11-05"
 type ProjectAccessor interface {
 	RepoMap(tokenBudget int, chatFiles []string, forceRefresh bool) string
 	SearchIdentifiers(query, filter string, limit int) []parser.Tag
+	BlastRadius(symbol, file string, maxDepth int) graph.BlastRadiusResult
+	FindDeadCode(minRank float32) graph.DeadCodeResult
+	ChangedSymbols(diff, gitRef string, includeBlastRadius bool) graph.ChangedSymbolsResult
 }
 
 // Server handles MCP JSON-RPC 2.0 traffic for a single project.
@@ -165,6 +169,46 @@ func (s *Server) toolsList() []map[string]any {
 				"required": []string{"project_root", "query"},
 			},
 		},
+		{
+			"name":        "get_blast_radius",
+			"description": "Returns every file and symbol that transitively depends on the given symbol. Use before renaming or deleting anything.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"project_root": map[string]any{"type": "string"},
+					"symbol":       map[string]any{"type": "string"},
+					"file":         map[string]any{"type": "string", "description": "Optional: narrow to a specific definition file when symbol is overloaded"},
+					"depth":        map[string]any{"type": "integer", "default": 3, "description": "Max traversal depth (1-10)"},
+				},
+				"required": []string{"project_root", "symbol"},
+			},
+		},
+		{
+			"name":        "find_dead_code",
+			"description": "Returns symbols defined but never referenced in the project, and files with no importers. Note: exported symbols and reflection-called code may appear dead — filter to unexported names first for best results.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"project_root": map[string]any{"type": "string"},
+					"min_rank":     map[string]any{"type": "number", "default": 0.001, "description": "Exclude files below this PageRank (entry points and scripts legitimately have no callers)"},
+				},
+				"required": []string{"project_root"},
+			},
+		},
+		{
+			"name":        "get_changed_symbols",
+			"description": "Given a git ref or unified diff, returns the symbols whose definitions fall within changed line ranges. Optionally includes blast radius for each changed symbol.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"project_root":         map[string]any{"type": "string"},
+					"git_ref":              map[string]any{"type": "string", "description": "Git ref to diff against HEAD (e.g. 'HEAD~1', 'main'). Use this OR diff, not both."},
+					"diff":                 map[string]any{"type": "string", "description": "Raw unified diff text. Use this OR git_ref, not both."},
+					"include_blast_radius": map[string]any{"type": "boolean", "default": false, "description": "Also compute blast radius for each changed symbol (slower)"},
+				},
+				"required": []string{"project_root"},
+			},
+		},
 	}
 }
 
@@ -185,8 +229,102 @@ func (s *Server) handleToolCall(raw json.RawMessage) (any, *RPCError) {
 		return s.toolRepoMap(call.Arguments)
 	case "search_identifiers":
 		return s.toolSearchIdentifiers(call.Arguments)
+	case "get_blast_radius":
+		return s.toolBlastRadius(call.Arguments)
+	case "find_dead_code":
+		return s.toolFindDeadCode(call.Arguments)
+	case "get_changed_symbols":
+		return s.toolChangedSymbols(call.Arguments)
 	}
 	return nil, &RPCError{Code: codeMethodNotFound, Message: "unknown tool: " + call.Name}
+}
+
+type blastRadiusArgs struct {
+	ProjectRoot string `json:"project_root"`
+	Symbol      string `json:"symbol"`
+	File        string `json:"file"`
+	Depth       int    `json:"depth"`
+}
+
+func (s *Server) toolBlastRadius(raw json.RawMessage) (any, *RPCError) {
+	var args blastRadiusArgs
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+		}
+	}
+	if err := s.validateRoot(args.ProjectRoot); err != nil {
+		return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+	}
+	if args.Symbol == "" {
+		return nil, &RPCError{Code: codeInvalidParams, Message: "symbol is required"}
+	}
+	if args.Depth <= 0 {
+		args.Depth = 3
+	}
+	if args.Depth > 10 {
+		args.Depth = 10
+	}
+	res := s.project.BlastRadius(args.Symbol, args.File, args.Depth)
+	body, err := json.Marshal(res)
+	if err != nil {
+		return nil, &RPCError{Code: codeInternalError, Message: err.Error()}
+	}
+	return map[string]any{"content": []map[string]any{{"type": "text", "text": string(body)}}}, nil
+}
+
+type findDeadCodeArgs struct {
+	ProjectRoot string  `json:"project_root"`
+	MinRank     float32 `json:"min_rank"`
+}
+
+func (s *Server) toolFindDeadCode(raw json.RawMessage) (any, *RPCError) {
+	args := findDeadCodeArgs{MinRank: 0.001}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+		}
+	}
+	if err := s.validateRoot(args.ProjectRoot); err != nil {
+		return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+	}
+	if args.MinRank == 0 {
+		args.MinRank = 0.001
+	}
+	res := s.project.FindDeadCode(args.MinRank)
+	body, err := json.Marshal(res)
+	if err != nil {
+		return nil, &RPCError{Code: codeInternalError, Message: err.Error()}
+	}
+	return map[string]any{"content": []map[string]any{{"type": "text", "text": string(body)}}}, nil
+}
+
+type changedSymbolsArgs struct {
+	ProjectRoot        string `json:"project_root"`
+	GitRef             string `json:"git_ref"`
+	Diff               string `json:"diff"`
+	IncludeBlastRadius bool   `json:"include_blast_radius"`
+}
+
+func (s *Server) toolChangedSymbols(raw json.RawMessage) (any, *RPCError) {
+	var args changedSymbolsArgs
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+		}
+	}
+	if err := s.validateRoot(args.ProjectRoot); err != nil {
+		return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+	}
+	if args.GitRef == "" && args.Diff == "" {
+		return nil, &RPCError{Code: codeInvalidParams, Message: "either git_ref or diff must be provided"}
+	}
+	res := s.project.ChangedSymbols(args.Diff, args.GitRef, args.IncludeBlastRadius)
+	body, err := json.Marshal(res)
+	if err != nil {
+		return nil, &RPCError{Code: codeInternalError, Message: err.Error()}
+	}
+	return map[string]any{"content": []map[string]any{{"type": "text", "text": string(body)}}}, nil
 }
 
 type repoMapArgs struct {

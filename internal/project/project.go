@@ -430,6 +430,74 @@ func (p *Project) SearchIdentifiers(query, filter string, limit int) []parser.Ta
 	return out
 }
 
+// BlastRadius returns transitive dependents of `symbol`.
+func (p *Project) BlastRadius(symbol, file string, maxDepth int) graph.BlastRadiusResult {
+	p.ensureHydrated()
+	p.touchMCP()
+	p.mu.RLock()
+	idx := make(map[string][]parser.Tag, len(p.index))
+	for k, v := range p.index {
+		idx[k] = v
+	}
+	g := p.graph
+	p.mu.RUnlock()
+	res := graph.BlastRadius(g, idx, symbol, file, maxDepth)
+	if p.bus != nil {
+		p.bus.Emit(p.Root, "mcp_call", map[string]interface{}{"tool": "get_blast_radius"})
+	}
+	return res
+}
+
+// FindDeadCode returns symbols defined but never referenced.
+func (p *Project) FindDeadCode(minRank float32) graph.DeadCodeResult {
+	p.ensureHydrated()
+	p.touchMCP()
+	p.mu.RLock()
+	idx := make(map[string][]parser.Tag, len(p.index))
+	for k, v := range p.index {
+		idx[k] = v
+	}
+	g := p.graph
+	ranks := p.ranks
+	p.mu.RUnlock()
+	res := graph.FindDeadCode(g, idx, ranks, minRank)
+	if p.bus != nil {
+		p.bus.Emit(p.Root, "mcp_call", map[string]interface{}{"tool": "find_dead_code"})
+	}
+	return res
+}
+
+// ChangedSymbols returns def-tags falling within changed line ranges.
+// Either `diff` (raw unified diff text) or `gitRef` must be provided.
+func (p *Project) ChangedSymbols(diff, gitRef string, includeBlastRadius bool) graph.ChangedSymbolsResult {
+	p.ensureHydrated()
+	p.touchMCP()
+	rawDiff := diff
+	if rawDiff == "" && gitRef != "" {
+		d, err := graph.GitDiff(p.Root, gitRef)
+		if err != nil {
+			return graph.ChangedSymbolsResult{
+				ChangedSymbols: []graph.ChangedSymbol{},
+				Summary:        "git diff error: " + err.Error(),
+			}
+		}
+		rawDiff = d
+	}
+	parsed := graph.ParseDiff(rawDiff)
+	p.mu.RLock()
+	idx := make(map[string][]parser.Tag, len(p.index))
+	for k, v := range p.index {
+		idx[k] = v
+	}
+	g := p.graph
+	p.mu.RUnlock()
+	res := graph.ChangedSymbols(idx, parsed, g, includeBlastRadius, 3)
+	if p.bus != nil {
+		p.bus.Emit(p.Root, "mcp_call", map[string]interface{}{"tool": "get_changed_symbols"})
+	}
+	return res
+}
+
 // MemoryEstimateBytes returns a rough heap-cost estimate for this project.
 func (p *Project) MemoryEstimateBytes() int64 {
 	p.mu.RLock()

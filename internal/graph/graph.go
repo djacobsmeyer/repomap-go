@@ -11,8 +11,9 @@ import (
 // FileGraph models references between files via shared symbol names.
 // Edges[a][b] = weight of an edge from a -> b (a references b).
 type FileGraph struct {
-	Edges map[string]map[string]float32
-	Files []string
+	Edges         map[string]map[string]float32
+	InvertedEdges map[string]map[string]float32
+	Files         []string
 }
 
 // Build constructs a file graph from a per-file tag index.
@@ -20,7 +21,8 @@ type FileGraph struct {
 // files that contain "def" tags for that name.
 func Build(tagsByFile map[string][]parser.Tag) *FileGraph {
 	g := &FileGraph{
-		Edges: make(map[string]map[string]float32),
+		Edges:         make(map[string]map[string]float32),
+		InvertedEdges: make(map[string]map[string]float32),
 	}
 	// Collect file list (stable order).
 	for f := range tagsByFile {
@@ -62,6 +64,10 @@ func Build(tagsByFile map[string][]parser.Tag) *FileGraph {
 					g.Edges[refFile] = make(map[string]float32)
 				}
 				g.Edges[refFile][defFile] += 1.0
+				if g.InvertedEdges[defFile] == nil {
+					g.InvertedEdges[defFile] = make(map[string]float32)
+				}
+				g.InvertedEdges[defFile][refFile] += 1.0
 			}
 		}
 	}
@@ -206,4 +212,228 @@ func RenderMap(ranks map[string]float32, tagsByFile map[string][]parser.Tag, tok
 		}
 	}
 	return b.String()
+}
+
+// --- Phase 2: blast radius ---------------------------------------------------
+
+type BlastRadiusResult struct {
+	Symbol               string            `json:"symbol"`
+	DefinedIn            string            `json:"defined_in"`
+	DirectDependents     []DependentSymbol `json:"direct_dependents"`
+	TransitiveDependents []DependentSymbol `json:"transitive_dependents"`
+	TotalFilesAffected   int               `json:"total_files_affected"`
+}
+
+type DependentSymbol struct {
+	File   string `json:"file"`
+	Symbol string `json:"symbol"`
+	Line   int    `json:"line"`
+	Depth  int    `json:"depth"`
+}
+
+// BlastRadius returns every file/symbol that transitively depends on `symbol`.
+// If `file` is non-empty, only definitions in that file seed the traversal.
+func BlastRadius(g *FileGraph, tagsByFile map[string][]parser.Tag, symbol, file string, maxDepth int) BlastRadiusResult {
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
+	res := BlastRadiusResult{
+		Symbol:               symbol,
+		DirectDependents:     []DependentSymbol{},
+		TransitiveDependents: []DependentSymbol{},
+	}
+
+	// Find seed def tags.
+	var seedFiles []string
+	seedSet := map[string]struct{}{}
+	var firstDef *parser.Tag
+	for f, tags := range tagsByFile {
+		if file != "" && f != file {
+			continue
+		}
+		for i, t := range tags {
+			if t.Name == symbol && t.Kind == "def" {
+				if _, ok := seedSet[f]; !ok {
+					seedSet[f] = struct{}{}
+					seedFiles = append(seedFiles, f)
+				}
+				if firstDef == nil {
+					firstDef = &tags[i]
+				}
+			}
+		}
+	}
+	if firstDef != nil {
+		res.DefinedIn = fmt.Sprintf("%s:%d", firstDef.RelFile, firstDef.Line)
+	}
+	if len(seedFiles) == 0 || g == nil {
+		return res
+	}
+
+	// BFS via InvertedEdges. Track depth per file (shortest path).
+	depth := map[string]int{}
+	for _, f := range seedFiles {
+		depth[f] = 0
+	}
+	queue := append([]string{}, seedFiles...)
+	touched := map[string]struct{}{}
+	for _, f := range seedFiles {
+		touched[f] = struct{}{}
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		d := depth[cur]
+		if d >= maxDepth {
+			continue
+		}
+		for next := range g.InvertedEdges[cur] {
+			if _, seen := depth[next]; seen {
+				continue
+			}
+			depth[next] = d + 1
+			touched[next] = struct{}{}
+			queue = append(queue, next)
+		}
+	}
+
+	// For each touched file (excluding seeds), collect ref-tags matching symbol.
+	type entry struct {
+		dep DependentSymbol
+	}
+	var direct, transitive []DependentSymbol
+	files := make([]string, 0, len(depth))
+	for f := range depth {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		if _, isSeed := seedSet[f]; isSeed {
+			continue
+		}
+		d := depth[f]
+		matched := false
+		for _, t := range tagsByFile[f] {
+			if t.Name == symbol && t.Kind == "ref" {
+				ds := DependentSymbol{File: f, Symbol: t.Name, Line: t.Line, Depth: d}
+				if d == 1 {
+					direct = append(direct, ds)
+				} else {
+					transitive = append(transitive, ds)
+				}
+				matched = true
+			}
+		}
+		// Even if no specific ref-tag matched the symbol name, the file is in
+		// the blast-radius (transitively referenced through another path).
+		if !matched {
+			ds := DependentSymbol{File: f, Symbol: "", Line: 0, Depth: d}
+			if d == 1 {
+				direct = append(direct, ds)
+			} else {
+				transitive = append(transitive, ds)
+			}
+		}
+	}
+	res.DirectDependents = direct
+	res.TransitiveDependents = transitive
+	if res.DirectDependents == nil {
+		res.DirectDependents = []DependentSymbol{}
+	}
+	if res.TransitiveDependents == nil {
+		res.TransitiveDependents = []DependentSymbol{}
+	}
+	// Unique files affected (excluding seeds).
+	uniq := map[string]struct{}{}
+	for f := range touched {
+		if _, isSeed := seedSet[f]; isSeed {
+			continue
+		}
+		uniq[f] = struct{}{}
+	}
+	res.TotalFilesAffected = len(uniq)
+	return res
+}
+
+// --- Phase 2: dead code ------------------------------------------------------
+
+type DeadCodeResult struct {
+	DeadSymbols []DeadSymbol `json:"dead_symbols"`
+	OrphanFiles []OrphanFile `json:"orphan_files"`
+	Summary     string       `json:"summary"`
+}
+
+type DeadSymbol struct {
+	File string `json:"file"`
+	Name string `json:"name"`
+	Line int    `json:"line"`
+	Kind string `json:"kind"`
+}
+
+type OrphanFile struct {
+	File string  `json:"file"`
+	Rank float32 `json:"rank"`
+}
+
+// FindDeadCode returns symbols defined but never referenced, plus files with
+// no inbound edges and PageRank at or below minRank.
+func FindDeadCode(g *FileGraph, tagsByFile map[string][]parser.Tag, ranks map[string]float32, minRank float32) DeadCodeResult {
+	referenced := map[string]struct{}{}
+	for _, tags := range tagsByFile {
+		for _, t := range tags {
+			if t.Kind == "ref" {
+				referenced[t.Name] = struct{}{}
+			}
+		}
+	}
+
+	var dead []DeadSymbol
+	files := make([]string, 0, len(tagsByFile))
+	for f := range tagsByFile {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		tags := tagsByFile[f]
+		// Stable order by line.
+		ordered := make([]parser.Tag, len(tags))
+		copy(ordered, tags)
+		sort.Slice(ordered, func(i, j int) bool { return ordered[i].Line < ordered[j].Line })
+		for _, t := range ordered {
+			if t.Kind != "def" {
+				continue
+			}
+			if _, ok := referenced[t.Name]; ok {
+				continue
+			}
+			dead = append(dead, DeadSymbol{File: f, Name: t.Name, Line: t.Line, Kind: t.Kind})
+		}
+	}
+
+	var orphans []OrphanFile
+	if g != nil {
+		for _, f := range g.Files {
+			if len(g.InvertedEdges[f]) > 0 {
+				continue
+			}
+			r := ranks[f]
+			if r > minRank {
+				continue
+			}
+			orphans = append(orphans, OrphanFile{File: f, Rank: r})
+		}
+		sort.Slice(orphans, func(i, j int) bool { return orphans[i].File < orphans[j].File })
+	}
+
+	if dead == nil {
+		dead = []DeadSymbol{}
+	}
+	if orphans == nil {
+		orphans = []OrphanFile{}
+	}
+	return DeadCodeResult{
+		DeadSymbols: dead,
+		OrphanFiles: orphans,
+		Summary:     fmt.Sprintf("%d dead symbols, %d orphan files", len(dead), len(orphans)),
+	}
 }
