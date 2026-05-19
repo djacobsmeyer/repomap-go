@@ -110,6 +110,119 @@ repomap events                # pretty-print SSE stream to terminal
 | 8 | STDIO proxy — repomap mcp <path> bridges stdin/stdout to daemon | ~30min |
 | 9 | Integration + status command memory report | ~30min |
 
+## Phase 2 — Planned: Impact Analysis Tools
+
+Adds three new MCP tools to cover the capabilities currently requiring a separate jcodemunch/code-review-graph installation. All built on the graph already constructed in Phase 1 — no new parsing required.
+
+### New MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `get_blast_radius` | Given a symbol name (+ optional file), returns every file and symbol that transitively depends on it |
+| `find_dead_code` | Returns symbols defined but never referenced anywhere in the project |
+| `get_changed_symbols` | Given a unified diff (or a git ref like `HEAD~1`), returns the symbols whose definitions fall within changed line ranges, plus their blast radius |
+
+### `get_blast_radius`
+
+**Input:** `symbol string`, `file string` (optional — narrows to a specific definition when the symbol is overloaded), `depth int` (default 3, max 10)
+
+**Algorithm:**
+1. Build the **inverted graph** at query time: for every edge A→B (A references something in B), add B→A to the inverted map. The inverted graph is derived from the existing `FileGraph.Edges` — O(E), computed once per index and cached on the `Project`.
+2. Find the seed: locate all tags where `Name == symbol && Kind == "def"` (filtered by file if provided).
+3. BFS/DFS from the seed file(s) through the inverted graph up to `depth` hops.
+4. At each hop, collect the referencing symbols (the specific `ref` tags that name our symbol) — not just the files.
+
+**Output:**
+```json
+{
+  "symbol": "handleRequest",
+  "defined_in": "internal/mcp/mcp.go:45",
+  "direct_dependents": [
+    { "file": "internal/daemon/daemon.go", "symbol": "AddProject", "line": 112 }
+  ],
+  "transitive_dependents": [
+    { "file": "cmd/repomap/main.go", "symbol": "daemonCmd", "line": 34, "depth": 2 }
+  ],
+  "total_files_affected": 3
+}
+```
+
+**Graph change needed:** Add `InvertedEdges map[string]map[string]float32` to `FileGraph`. Rebuild when the main graph rebuilds. Adds ~same memory as the forward graph.
+
+---
+
+### `find_dead_code`
+
+**Input:** `min_rank float32` (default 0.001 — skip genuinely isolated files like standalone scripts), `kinds []string` (default `["def"]`, could filter to `["function", "class"]` etc.)
+
+**Algorithm:**
+1. Collect all `def` tag names across the project into a set: `defined`.
+2. Collect all `ref` tag names into a set: `referenced`.
+3. Dead symbols = `defined \ referenced` (defined but never referenced).
+4. Filter by `min_rank` — exclude files whose PageRank is below threshold (entry points, scripts, and test files legitimately have no callers).
+5. Optionally: also report **orphan files** — files with zero inbound edges in the graph (no other file imports them). These are file-level dead code.
+
+**Output:**
+```json
+{
+  "dead_symbols": [
+    { "file": "internal/cache/cache.go", "name": "legacyMigrate", "line": 203, "kind": "def" }
+  ],
+  "orphan_files": [
+    { "file": "internal/util/scratch.go", "rank": 0.0001 }
+  ],
+  "summary": "4 dead symbols, 1 orphan file"
+}
+```
+
+**Caveats to encode in the tool description:** reflection-called symbols and exported public API symbols appear "dead" by static analysis but aren't. The tool should note this and suggest filtering to unexported symbols first (`name[0] >= 'a' && name[0] <= 'z'` in Go, `_`-prefixed or non-exported in Python, etc.).
+
+---
+
+### `get_changed_symbols`
+
+**Input:** `diff string` (unified diff text) OR `git_ref string` (e.g. `"HEAD~1"`, `"main"`) — one required. `include_blast_radius bool` (default false — can be expensive).
+
+**Algorithm:**
+1. If `git_ref` provided: shell out to `git diff <ref> HEAD --unified=0` in the project root to get the diff. (Security: validate `git_ref` against `[a-zA-Z0-9._~^/-]+` — no shell injection.)
+2. Parse unified diff: extract `+++ b/<file>` headers and `@@ -old +new,count @@` hunks → build map of `file → []changedLineRange`.
+3. For each changed file, walk its `def` tags: if `tag.Line` falls within any changed range, include it.
+4. If `include_blast_radius`: for each matched symbol, call the blast-radius BFS (depth 2 to keep it fast).
+
+**Output:**
+```json
+{
+  "changed_symbols": [
+    {
+      "file": "internal/graph/graph.go",
+      "symbol": "PageRank",
+      "line": 44,
+      "kind": "def",
+      "blast_radius": { "total_files_affected": 2, "direct_dependents": [...] }
+    }
+  ],
+  "unchanged_files_affected": ["internal/project/project.go"]
+}
+```
+
+---
+
+### Implementation plan
+
+| Sub-phase | Scope | Est. |
+|-----------|-------|------|
+| 2a | Add `InvertedEdges` to `FileGraph`, rebuild on every reindex | ~30min |
+| 2b | `get_blast_radius` MCP tool + BFS traversal | ~1hr |
+| 2c | `find_dead_code` MCP tool + set difference + orphan detection | ~45min |
+| 2d | `get_changed_symbols` MCP tool + diff parser + git_ref shelling | ~1hr |
+| 2e | Wire all three into the per-project MCP handler | ~30min |
+
+**Total: ~3.5 hours**
+
+No new dependencies required. The diff parser is straightforward enough for stdlib. The git shell-out is already safe-patternted in the security notes below.
+
+---
+
 ## Prerequisites
 
 ```bash
@@ -121,3 +234,4 @@ brew install go   # requires Go 1.22+
 - `project_root` parameter is validated to be an absolute path within a registered project — no path traversal
 - `.env` files are excluded from parsing (no Tree-sitter grammar; explicitly skipped in file filter)
 - SSE stream is localhost-only by default
+- `git_ref` parameter (Phase 2) validated against `[a-zA-Z0-9._~^/-]+` before shell execution
