@@ -16,10 +16,44 @@ type FileGraph struct {
 	Files         []string
 }
 
+// slugify converts a heading string to a GitHub-style anchor slug: lowercase,
+// spaces to dashes, and every other non-alphanumeric-dash rune dropped.
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	s = strings.Map(func(r rune) rune {
+		if r == ' ' {
+			return '-'
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, s)
+	return s
+}
+
+// symbolKey returns the bucket key for a tag. For markdown heading definitions
+// the key is namespaced by file (RelFile#slug) so that a common heading name
+// like "Introduction" in two documents does not create a false cross-file
+// dependency. All other tags key on the bare name.
+func symbolKey(t parser.Tag) string {
+	if t.Lang == "markdown" && t.IsDef() {
+		return t.RelFile + "#" + slugify(t.Name)
+	}
+	return t.Name
+}
+
 // Build constructs a file graph from a per-file tag index.
 // For each symbol name, files that contain "ref" tags get edges pointing to
 // files that contain "def" tags for that name.
-func Build(tagsByFile map[string][]parser.Tag) *FileGraph {
+//
+// resolveRef, if non-nil, is invoked for every markdown "ref" tag to normalize
+// its raw link destination (Name) into a canonical RelFile before bucketing.
+// Returning "" from resolveRef drops the reference (external URLs, image
+// embeds, unresolvable targets) so it creates no edge. If resolveRef is nil,
+// markdown refs are treated like any other ref (identity) — keeping non-
+// markdown callers and tests backward compatible.
+func Build(tagsByFile map[string][]parser.Tag, resolveRef func(name, relFile string) string) *FileGraph {
 	g := &FileGraph{
 		Edges:         make(map[string]map[string]float32),
 		InvertedEdges: make(map[string]map[string]float32),
@@ -36,19 +70,56 @@ func Build(tagsByFile map[string][]parser.Tag) *FileGraph {
 		refs map[string]struct{}
 	}
 	buckets := make(map[string]*symBucket)
+	getBucket := func(key string) *symBucket {
+		b, ok := buckets[key]
+		if !ok {
+			b = &symBucket{defs: map[string]struct{}{}, refs: map[string]struct{}{}}
+			buckets[key] = b
+		}
+		return b
+	}
+
+	// mdFiles tracks every file that contains markdown tags. Each markdown
+	// file is registered as a definer of a symbol equal to its own RelFile so
+	// that a resolved inter-document link (which buckets on the target
+	// RelFile) finds a matching def and produces a file -> file edge.
+	mdFiles := map[string]struct{}{}
+
 	for file, tags := range tagsByFile {
 		for _, t := range tags {
-			b, ok := buckets[t.Name]
-			if !ok {
-				b = &symBucket{defs: map[string]struct{}{}, refs: map[string]struct{}{}}
-				buckets[t.Name] = b
+			if t.Lang == "markdown" {
+				mdFiles[file] = struct{}{}
 			}
+			// Markdown references hold a raw link destination. Resolve it to
+			// a canonical RelFile so the edge points at the right document.
+			if t.Lang == "markdown" && t.Kind == "ref" {
+				dest := t.Name
+				if resolveRef != nil {
+					dest = resolveRef(t.Name, t.RelFile)
+				}
+				if dest == "" {
+					// External URL, image embed, or unresolvable — no edge.
+					continue
+				}
+				// Bucket the ref on the bare target RelFile; the target
+				// file's synthetic def (added below) lives in the same key.
+				getBucket(dest).refs[file] = struct{}{}
+				continue
+			}
+			// Non-markdown tags (and markdown heading defs) bucket on
+			// symbolKey, preserving the def/ref distinction.
+			b := getBucket(symbolKey(t))
 			if t.Kind == "ref" {
 				b.refs[file] = struct{}{}
 			} else {
 				b.defs[file] = struct{}{}
 			}
 		}
+	}
+
+	// Register each markdown file as a definer of its own RelFile symbol.
+	for file := range mdFiles {
+		getBucket(file).defs[file] = struct{}{}
 	}
 
 	for _, b := range buckets {

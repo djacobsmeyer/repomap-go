@@ -17,6 +17,7 @@ import (
 	"github.com/djacobsmeyer/repomap-go/internal/events"
 	"github.com/djacobsmeyer/repomap-go/internal/graph"
 	"github.com/djacobsmeyer/repomap-go/internal/ignore"
+	"github.com/djacobsmeyer/repomap-go/internal/mdresolver"
 	"github.com/djacobsmeyer/repomap-go/internal/parser"
 	"github.com/djacobsmeyer/repomap-go/internal/watcher"
 )
@@ -352,12 +353,21 @@ func (p *Project) initialIndex() error {
 func (p *Project) rebuildGraph() {
 	p.mu.Lock()
 	snapshot := make(map[string][]parser.Tag, len(p.index))
+	allFiles := make([]string, 0, len(p.index))
 	for k, v := range p.index {
 		snapshot[k] = v
+		allFiles = append(allFiles, k)
 	}
 	p.mu.Unlock()
 
-	g := graph.Build(snapshot)
+	// Markdown link resolver: resolves raw link destinations / wikilink
+	// targets to canonical RelFiles before edges are built. External URLs
+	// and image embeds resolve to "" and create no edge.
+	resolveRef := func(dest, sourceRelFile string) string {
+		return mdresolver.Resolve(dest, sourceRelFile, allFiles)
+	}
+
+	g := graph.Build(snapshot, resolveRef)
 	r := graph.PageRank(g, 15, 0.85)
 
 	p.mu.Lock()

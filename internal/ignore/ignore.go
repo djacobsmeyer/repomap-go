@@ -43,14 +43,18 @@ var defaultIgnoreDirs = map[string]bool{
 	".nyc_output":   true,
 	".turbo":        true,
 	".cache":        true,
+	".obsidian":     true,
+	".trash":        true,
 }
 
 // defaultIgnoreFilePatterns are filename globs that should always be skipped.
 var defaultIgnoreFilePatterns = []string{
-	"*.d.ts",   // TypeScript declaration files — generated
-	"*.min.js", // minified JS
-	"*.pb.go",  // protobuf-generated Go
-	"*.gen.go", // generated Go
+	"*.d.ts",       // TypeScript declaration files — generated
+	"*.min.js",     // minified JS
+	"*.pb.go",      // protobuf-generated Go
+	"*.gen.go",     // generated Go
+	"*.canvas",     // Obsidian canvas — not a markdown document
+	"*.excalidraw", // Excalidraw drawing — not a markdown document
 }
 
 // pattern is a parsed gitignore-style rule.

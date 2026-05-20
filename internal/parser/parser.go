@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/markdown"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 )
@@ -46,13 +48,15 @@ func FilenameToLang(path string) string {
 
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".md", ".json", ".yaml", ".yml", ".toml", ".lock", ".sum", ".mod",
+	case ".json", ".yaml", ".yml", ".toml", ".lock", ".sum", ".mod",
 		".txt", ".css", ".html", ".svg", ".png", ".jpg", ".jpeg", ".gif",
 		".ico", ".wasm":
 		return ""
 	}
 
 	switch ext {
+	case ".md", ".markdown":
+		return "markdown"
 	case ".ts", ".tsx":
 		return "typescript"
 	case ".js", ".jsx", ".mjs":
@@ -128,6 +132,11 @@ func languageAndQuery(lang string) (*sitter.Language, string, bool) {
 		return golang.GetLanguage(), goQuery, true
 	case "python":
 		return python.GetLanguage(), pyQuery, true
+	case "markdown":
+		// Markdown uses a two-tree parse path (block tree + inline trees),
+		// not the standard single-query path. Return !ok so ParseFile routes
+		// to parseMarkdownFile instead.
+		return nil, "", false
 	}
 	return nil, "", false
 }
@@ -140,10 +149,6 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 	if lang == "" {
 		return nil, nil
 	}
-	tsLang, queryStr, ok := languageAndQuery(lang)
-	if !ok {
-		return nil, nil
-	}
 
 	abs := filepath.Join(root, relpath)
 	data, err := os.ReadFile(abs)
@@ -151,6 +156,16 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 		return nil, err
 	}
 	if len(data) == 0 {
+		return nil, nil
+	}
+
+	// Markdown uses a separate two-tree parse path.
+	if lang == "markdown" {
+		return parseMarkdownFile(relpath, data)
+	}
+
+	tsLang, queryStr, ok := languageAndQuery(lang)
+	if !ok {
 		return nil, nil
 	}
 
@@ -220,10 +235,159 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 	return tags, nil
 }
 
+// wikilinkRe matches Obsidian-style wikilinks: [[Target]] or [[Target|Alias]].
+// The captured group is the inner text; the resolver splits off any alias.
+var wikilinkRe = regexp.MustCompile(`\[\[([^\]]+)\]\]`)
+
+// mdHeadingKind maps an ATX marker node type to a granular heading Kind.
+func mdHeadingKind(markerType string) string {
+	switch markerType {
+	case "atx_h1_marker":
+		return "heading-1"
+	case "atx_h2_marker":
+		return "heading-2"
+	case "atx_h3_marker":
+		return "heading-3"
+	case "atx_h4_marker":
+		return "heading-4"
+	case "atx_h5_marker":
+		return "heading-5"
+	case "atx_h6_marker":
+		return "heading-6"
+	}
+	return "heading"
+}
+
+// parseMarkdownFile parses a markdown document using the dual-tree markdown
+// grammar (block tree for headings, inline trees for links). It returns:
+//
+//   - one def tag per ATX heading (Kind "heading-N", Name = heading text)
+//   - one ref tag per inline link (Kind "ref", Name = raw link destination)
+//   - one ref tag per wikilink (Kind "ref", Name = raw wikilink target)
+//
+// Image embeds (`![alt](dest)`) are skipped: in this grammar they parse as a
+// distinct `image` node, never `inline_link`, so matching only `inline_link`
+// excludes them automatically. Link destinations are stored raw here — the
+// graph layer runs them through mdresolver to obtain canonical RelFiles.
+func parseMarkdownFile(relpath string, data []byte) ([]Tag, error) {
+	tree, err := markdown.ParseCtx(context.Background(), nil, data)
+	if err != nil || tree == nil {
+		// soft failure
+		return nil, nil
+	}
+
+	var tags []Tag
+
+	// Walk the block tree. For each atx_heading, emit a heading def. For each
+	// block node carrying an inline subtree, walk that subtree for links.
+	tree.Iter(func(n *markdown.Node) bool {
+		if n.Node == nil {
+			return true
+		}
+		if n.Type() == "atx_heading" {
+			if t, ok := headingTag(n.Node, relpath, data); ok {
+				tags = append(tags, t)
+			}
+		}
+		if n.Inline != nil {
+			collectInlineLinks(n.Inline, relpath, data, &tags)
+		}
+		return true
+	})
+
+	// Wikilinks: the inline grammar parses [[Title]] as a shortcut_link and
+	// strips the brackets, so a regex over raw bytes is the reliable path.
+	for _, m := range wikilinkRe.FindAllSubmatchIndex(data, -1) {
+		// m[2]:m[3] is the captured inner text.
+		inner := strings.TrimSpace(string(data[m[2]:m[3]]))
+		if inner == "" {
+			continue
+		}
+		line := 1 + strings.Count(string(data[:m[0]]), "\n")
+		tags = append(tags, Tag{
+			RelFile: relpath,
+			Line:    line,
+			Name:    inner,
+			Kind:    "ref",
+			Lang:    "markdown",
+		})
+	}
+
+	return tags, nil
+}
+
+// headingTag builds a heading def tag from an atx_heading node. The heading
+// level comes from the ATX marker child; the text comes from the inline child.
+func headingTag(heading *sitter.Node, relpath string, data []byte) (Tag, bool) {
+	var kind, text string
+	for i := 0; i < int(heading.NamedChildCount()); i++ {
+		child := heading.NamedChild(i)
+		if child == nil {
+			continue
+		}
+		ct := child.Type()
+		switch {
+		case strings.HasPrefix(ct, "atx_h") && strings.HasSuffix(ct, "_marker"):
+			kind = mdHeadingKind(ct)
+		case ct == "inline":
+			text = strings.TrimSpace(child.Content(data))
+		}
+	}
+	if kind == "" {
+		kind = "heading"
+	}
+	if text == "" {
+		return Tag{}, false
+	}
+	return Tag{
+		RelFile: relpath,
+		Line:    int(heading.StartPoint().Row) + 1,
+		Name:    text,
+		Kind:    kind,
+		Lang:    "markdown",
+	}, true
+}
+
+// collectInlineLinks recursively walks an inline subtree and appends a ref tag
+// for every inline_link's link_destination. `image` nodes are not recursed
+// into, so image-embed destinations are never collected.
+func collectInlineLinks(node *sitter.Node, relpath string, data []byte, tags *[]Tag) {
+	if node == nil {
+		return
+	}
+	if node.Type() == "image" {
+		// Image embed — skip the whole subtree.
+		return
+	}
+	if node.Type() == "inline_link" {
+		for i := 0; i < int(node.NamedChildCount()); i++ {
+			child := node.NamedChild(i)
+			if child != nil && child.Type() == "link_destination" {
+				dest := strings.TrimSpace(child.Content(data))
+				if dest != "" {
+					*tags = append(*tags, Tag{
+						RelFile: relpath,
+						Line:    int(node.StartPoint().Row) + 1,
+						Name:    dest,
+						Kind:    "ref",
+						Lang:    "markdown",
+					})
+				}
+			}
+		}
+		// An inline_link cannot meaningfully nest another inline_link
+		// destination; no further recursion needed for this branch.
+		return
+	}
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		collectInlineLinks(node.NamedChild(i), relpath, data, tags)
+	}
+}
+
 // SupportedExtensions returns the list of extensions the parser can handle
 // (informational helper for walkers).
 func SupportedExtensions() []string {
-	return []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".go", ".py"}
+	return []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".go", ".py", ".md", ".markdown"}
 }
 
 // Errorf is a small helper to wrap parse errors with context.

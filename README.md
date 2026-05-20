@@ -148,10 +148,73 @@ repomap events                # pretty-print SSE stream to terminal
 | Tool | Params | Description |
 |------|--------|-------------|
 | `repo_map` | `project_root`, `map_tokens` (default 8192), `chat_files`, `force_refresh` | Ranked structural map of the project — definitions only, sorted by PageRank |
-| `search_identifiers` | `project_root`, `query`, `filter` (defs/refs/both), `kinds`, `limit` | Find functions/classes/variables by name |
+| `search_identifiers` | `project_root`, `query`, `filter` (defs/refs/both), `kinds`, `limit` | Find functions/classes/variables by name. For markdown: filter by `kinds: ["heading-1","heading-2","heading-3"]` |
 | `get_blast_radius` | `project_root`, `symbol`, `file` (optional), `depth` (default 3) | Every file and symbol that transitively depends on a given symbol |
 | `find_dead_code` | `project_root`, `min_rank`, `unexported_only`, `exported_only`, `kinds` | Symbols defined but never referenced; use `unexported_only: true` for actionable results |
 | `get_changed_symbols` | `project_root`, `git_ref` OR `diff`, `include_blast_radius` | Symbols whose definitions fall within changed line ranges |
+
+## Markdown / knowledge base support
+
+`.md` and `.markdown` files are indexed alongside code. The same five MCP tools work unchanged — only the vocabulary of "symbols" shifts.
+
+### What counts as a symbol in markdown
+
+| Kind | Example | Def or Ref |
+|------|---------|------------|
+| `heading-1` … `heading-6` | `# Overview`, `## Installation` | Definition — structural landmark |
+| `link` (inline link) | `[see setup](../setup.md)` | Reference — inter-document edge |
+| `wikilink` | `[[Architecture Overview]]` | Reference — Obsidian/Foam vault link |
+
+Frontmatter keys and code fence info strings are extracted for `search_identifiers` but do **not** form graph edges — they carry no inter-document reference semantics.
+
+### How the graph works for docs
+
+Each markdown file registers itself as a definition. An `[inline link](target.md)` or `[[Wikilink]]` in file A creates a directed edge A → target, exactly like a function call in code. PageRank over those edges identifies hub documents — files that many others link to. `find_dead_code` surfaces orphan pages (zero inbound links) and `get_blast_radius` answers "which documents link to this one?"
+
+### Token efficiency for AI agents
+
+Naively reading a large knowledge base costs tokens proportional to total file size. A `repo_map` call instead delivers a PageRank-sorted heading outline within a fixed token budget:
+
+```
+ALGORITHM/v6.3.0.md:          (Rank: 4.21)
+  1: The Algorithm 6.3.0
+  5: Doctrine — Read This First, Internalize It
+  25: Effort Levels
+  ...
+DOCUMENTATION/Architecture.md: (Rank: 3.88)
+  1: PAI Architecture Summary
+  6: Overview
+  14: Subsystem Reference
+```
+
+For a 500-file vault (~50 MB of prose), `repo_map(map_tokens=8192)` delivers structural orientation at ~1–2% of the raw read cost. Cross-cutting lookups like `get_blast_radius` reduce targeted searches by 5–10× versus scanning each file.
+
+### When markdown repomap is most useful
+
+**Works best when files link to each other** — Obsidian vaults with `[[wikilinks]]`, documentation sites with `[cross-references](other.md)`, wikis, and any corpus where documents explicitly cite related documents. PageRank identifies hub pages; orphan detection surfaces isolated content.
+
+**Limited graph signal when files don't link** — Some knowledge bases (e.g. AI-prompt vaults loaded via `@-import` conventions, or lecture notes with no cross-refs) have sparse link graphs. In those vaults `find_dead_code` will show most files as "orphans" and `get_blast_radius` will return few dependents — not a bug, but an accurate description of the link structure. `search_identifiers` and heading extraction still work regardless of link density.
+
+### Ignored by default in markdown projects
+
+In addition to standard code ignores (`node_modules`, `.git`, etc.), markdown indexing skips:
+
+| Pattern | Reason |
+|---------|--------|
+| `.obsidian/` | Obsidian config and plugin data |
+| `.trash/` | Obsidian deleted-notes folder |
+| `*.canvas` | Obsidian canvas JSON (not a text document) |
+| `*.excalidraw` | Embedded diagram files |
+| Image/binary extensions | `.png`, `.jpg`, `.gif`, `.pdf`, `.svg`, `.webp` — link destinations are filtered; files are not parsed |
+
+### Link resolution
+
+Link destinations are resolved before edges are built:
+
+- **Relative paths** (`../auth/README.md`) — joined against the source file's directory
+- **Wikilinks** (`[[Title]]`) — matched against project file basenames; exact match wins, lexicographic-first on ties; `[[Title|Alias]]` aliases are stripped
+- **External URLs** (`https://...`) — dropped, no edge created
+- **Image embeds** (`![alt](img.png)`) — skipped at parse time (distinct `image` node type in the grammar) and filtered by extension in the resolver
 
 ## Dependencies
 
