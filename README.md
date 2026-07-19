@@ -228,9 +228,85 @@ Link destinations are resolved before edges are built:
 
 ## Prerequisites
 
+- Go 1.22+ (install however you prefer — e.g. https://go.dev/dl/, your OS package
+  manager, or a version manager like `mise`)
+- A C compiler (`cc`) on `PATH` — the Tree-sitter parser bindings use cgo. macOS:
+  Xcode Command Line Tools (`xcode-select --install`). Linux: `build-essential` /
+  `gcc` from your distro's package manager.
+
+## Installation
+
+Any of the following gets you a working `repomap` binary. None of them assume a
+particular tool beyond the Go toolchain itself.
+
+### Option A: `go install` (zero extra tooling)
+
 ```bash
-brew install go   # requires Go 1.22+
+go install github.com/djacobsmeyer/repomap-go/cmd/repomap@latest
 ```
+
+This is the canonical Go-native path: it builds and drops the binary at
+`$(go env GOBIN)`, or `$(go env GOPATH)/bin` if `GOBIN` is unset (typically
+`~/go/bin`). Make sure that directory is on your `PATH`. From a local clone, drop
+the `@latest` and run `go install ./cmd/repomap` instead.
+
+If you manage Go through `mise`, route the install through it instead of calling
+`go` directly, and set `GOBIN` *inside* the `mise exec` command rather than
+before it — `mise exec` sets up its own environment and a `GOBIN=...` set before
+`mise exec --` on the command line gets overridden, not passed through:
+
+```bash
+mise exec -- env GOBIN=~/go/bin go install ./cmd/repomap
+```
+
+### Option B: `make install`
+
+```bash
+make build            # builds ./bin/repomap
+make install           # installs to $(PREFIX)/bin, PREFIX defaults to /usr/local
+make install PREFIX=~/.local   # or any other prefix you have write access to
+make uninstall          # removes the installed binary
+make clean              # removes ./bin
+```
+
+`make install` just copies the built binary into `$(PREFIX)/bin` — no package
+manager, no OS-specific logic.
+
+### Running the daemon persistently
+
+repomap is a centralized daemon that serves many projects, so it's meant to run
+continuously rather than be started by hand each session. Service templates are
+provided for both major desktop/server platforms, with the binary path
+parameterized rather than hardcoded:
+
+- `contrib/launchd/com.repomap.daemon.plist.tmpl` — macOS `launchd` LaunchAgent
+- `contrib/systemd/repomap.service.tmpl` — Linux `systemd` user unit
+
+Render the template for your OS with the real installed binary path filled in:
+
+```bash
+make install-service PREFIX=~/.local
+# or directly: scripts/install-service.sh /path/to/installed/repomap
+```
+
+This writes the rendered file to `dist/service/` and prints the exact commands to
+install and enable it (`launchctl load ...` on macOS, `systemctl --user enable
+--now ...` on Linux). It does not copy into your system service directories or
+load/enable anything itself — that step is left to you.
+
+### Registering with Claude Code (MCP)
+
+Once `repomap` is on `PATH` (via either install option above), register it per
+project using the bare command name — no absolute path needed:
+
+```bash
+claude mcp add repomap -- repomap mcp <ABS_PROJECT_PATH>
+```
+
+This is local scope by default: the registration is stored in your user config
+for that project path, not as a tracked `.mcp.json` in the project itself. The
+first MCP tool call from that project auto-registers and indexes it with the
+daemon — no separate `repomap add` step required.
 
 ## Security notes
 
