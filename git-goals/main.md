@@ -1,0 +1,1 @@
+review and finish MCP prompts endpoint (salvage of Qwen draft)
