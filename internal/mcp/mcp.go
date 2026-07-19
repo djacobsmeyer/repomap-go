@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strings"
 
 	"github.com/djacobsmeyer/repomap-go/internal/graph"
 	"github.com/djacobsmeyer/repomap-go/internal/parser"
@@ -120,6 +121,15 @@ func (s *Server) dispatch(req Request) Response {
 		} else {
 			resp.Result = result
 		}
+	case "prompts/list":
+		resp.Result = map[string]any{"prompts": s.promptsList()}
+	case "prompts/get":
+		result, rpcErr := s.handlePromptGet(req.Params)
+		if rpcErr != nil {
+			resp.Error = rpcErr
+		} else {
+			resp.Result = result
+		}
 	case "ping":
 		resp.Result = map[string]any{}
 	default:
@@ -133,7 +143,7 @@ func (s *Server) dispatch(req Request) Response {
 func (s *Server) initializeResult() map[string]any {
 	return map[string]any{
 		"protocolVersion": MCPVersion,
-		"capabilities":    map[string]any{"tools": map[string]any{}},
+		"capabilities":    map[string]any{"tools": map[string]any{}, "prompts": map[string]any{}},
 		"serverInfo":      map[string]any{"name": "repomap", "version": "0.1.0"},
 		"tools":           s.toolsList(),
 	}
@@ -399,6 +409,122 @@ func (s *Server) toolSearchIdentifiers(raw json.RawMessage) (any, *RPCError) {
 			{"type": "text", "text": string(body)},
 		},
 	}, nil
+}
+
+// --- prompts ---------------------------------------------------------------
+
+// promptGetParams is the arguments parsed from a prompts/get request.
+type promptGetParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+func (s *Server) promptsList() []map[string]any {
+	return []map[string]any{
+		{
+			"name":        "explain",
+			"description": "Teaches an agent how to use repomap effectively — daemon architecture, all 5 tools, SSE event stream, and worked examples.",
+			"arguments": []map[string]any{
+				{
+					"name":        "project_root",
+					"description": "Optional: restrict to a specific project root. Defaults to this server's bound project.",
+					"required":    false,
+				},
+			},
+		},
+	}
+}
+
+func (s *Server) handlePromptGet(raw json.RawMessage) (any, *RPCError) {
+	var params promptGetParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+	}
+	if params.Name != "explain" {
+		return nil, &RPCError{Code: codeInvalidParams, Message: "unknown prompt: " + params.Name}
+	}
+
+	var args struct {
+		ProjectRoot string `json:"project_root"`
+	}
+	if len(params.Arguments) > 0 {
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+		}
+	}
+	if err := s.validateRoot(args.ProjectRoot); err != nil {
+		return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+	}
+
+	return map[string]any{
+		"description": "How to use repomap effectively",
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": map[string]any{"type": "text", "text": s.explainMessage()},
+			},
+		},
+	}, nil
+}
+
+func (s *Server) explainMessage() string {
+	var b strings.Builder
+	bt := "`"
+	in := func(s string) string { return bt + s + bt }
+
+	b.WriteString("# repomap — How to Use This MCP Server\n\n")
+	b.WriteString("## Architecture\n\n")
+	b.WriteString("repomap runs as a **persistent background daemon** (one process). Each project gets its own goroutine, in-memory index, and fsnotify file watcher. The daemon exposes a Unix control socket and an SSE event stream on localhost:7374.\n\n")
+	b.WriteString("Claude Code connects via a thin STDIO proxy (" + in("repomap mcp <path>") + ") that bridges to the daemon's per-project socket. The proxy is ephemeral; the daemon stays alive. If the daemon isn't already running, the proxy starts it automatically.\n\n")
+
+	b.WriteString("## Auto-registration\n\n")
+	b.WriteString("The **first MCP call to a new project automatically registers it** with the daemon. You do not need to run " + in("repomap add") + " manually — the proxy's " + in("mcp_connect") + " message triggers " + in("AddProject") + " on the daemon, which starts indexing and spawns the file watcher.\n\n")
+
+	b.WriteString("## The 5 Tools\n\n")
+	b.WriteString("| Tool | Required Params | Optional Params | When to Use |\n")
+	b.WriteString("|------|----------------|-----------------|-------------|\n")
+	b.WriteString("| " + in("repo_map") + " | " + in("project_root") + " | " + in("map_tokens") + " (default 8192), " + in("chat_files") + ", " + in("force_refresh") + " | Get a PageRank-sorted structural map of the project. Use for overview before any edit, or when you need the big picture. |\n")
+	b.WriteString("| " + in("search_identifiers") + " | " + in("project_root") + ", " + in("query") + " | " + in("filter") + " (defs/refs/both), " + in("kinds") + " (function, method, class, etc.), " + in("limit") + " (default 50) | Find functions, classes, or variables by name. Use " + in("filter: \"defs\"") + " to see definitions only, " + in("\"refs\"") + " for callers. |\n")
+	b.WriteString("| " + in("get_blast_radius") + " | " + in("project_root") + ", " + in("symbol") + " | " + in("file") + " (when symbol is overloaded), " + in("depth") + " (default 3, max 10) | Returns every file and symbol that transitively depends on the given symbol. **Call this BEFORE renaming or deleting** anything. |\n")
+	b.WriteString("| " + in("find_dead_code") + " | " + in("project_root") + " | " + in("min_rank") + " (default 0.001), " + in("unexported_only") + " (default false), " + in("exported_only") + " (default false), " + in("kinds") + " | Returns symbols defined but never referenced. Use " + in("unexported_only: true") + " for best signal-to-noise (exported symbols and reflection-called code produce false positives). |\n")
+	b.WriteString("| " + in("get_changed_symbols") + " | " + in("project_root") + " | " + in("git_ref") + " (e.g. \"HEAD~1\") OR " + in("diff") + " (raw unified diff), " + in("include_blast_radius") + " (default false) | Returns symbols whose definitions fall within changed line ranges. Use for PR reviews or before merging. |\n\n")
+
+	b.WriteString("## SSE Event Stream\n\n")
+	b.WriteString("For human monitoring, the daemon exposes a Server-Sent Events stream:\n\n")
+	b.WriteString("- **CLI**: " + in("repomap events [--project <path>]") + " — pretty-printed, ANSI-colored\n")
+	b.WriteString("- **curl**: " + in("curl -N http://localhost:7374/events") + " (raw SSE)\n\n")
+	b.WriteString("Event types: " + in("project_added") + ", " + in("mcp_listener_error") + ", " + in("project_idle") + ", " + in("project_rehydrated") + ", " + in("reindex_started") + ", " + in("file_changed") + ", " + in("cache_hit") + ", " + in("reindex_complete") + ", " + in("mcp_call") + ".\n\n")
+	b.WriteString("The daemon watches files with a 300ms debounce window — burst edits (save + lint + format) are collapsed into one reindex.\n\n")
+
+	b.WriteString("## Worked Examples\n\n")
+	b.WriteString("**Example 1: Before refactoring a function**\n\n")
+	b.WriteString("You want to rename " + in("processPayment") + " to " + in("chargeOrder") + ". First, use " + in("get_blast_radius") + " to see all dependents:\n\n")
+	b.WriteString("1. Call " + in("get_blast_radius") + " with " + in("symbol: \"processPayment\"") + " and " + in("depth: 5") + "\n")
+	b.WriteString("2. Review the returned symbols and files\n")
+	b.WriteString("3. For each affected file, call " + in("repo_map") + " with a smaller " + in("map_tokens") + " (e.g. 4096) to see the local context\n")
+	b.WriteString("4. Make your changes\n\n")
+
+	b.WriteString("**Example 2: Before merging a PR**\n\n")
+	b.WriteString("You've committed changes on a feature branch and want to understand the impact:\n\n")
+	b.WriteString("1. Call " + in("get_changed_symbols") + " with " + in("git_ref: \"main\"") + " and " + in("include_blast_radius: true") + "\n")
+	b.WriteString("2. Review each changed symbol's blast radius\n")
+	b.WriteString("3. For high-risk symbols, call " + in("repo_map") + " with " + in("force_refresh: true") + " to get the latest structural map\n\n")
+
+	b.WriteString("**Example 3: Cleaning up old code**\n\n")
+	b.WriteString("You suspect unused functions are accumulating:\n\n")
+	b.WriteString("1. Call " + in("find_dead_code") + " with " + in("unexported_only: true") + "\n")
+	b.WriteString("2. Review the returned list — these are symbols defined but never called\n")
+	b.WriteString("3. For questionable cases, call " + in("search_identifiers") + " with " + in("filter: \"refs\"") + " to verify there are truly no callers\n\n")
+
+	b.WriteString("## Quick Reference\n\n")
+	b.WriteString("- " + in("repomap daemon start") + " — start the background daemon\n")
+	b.WriteString("- " + in("repomap daemon status") + " — check uptime, active projects\n")
+	b.WriteString("- " + in("repomap add <path>") + " — manually register a project (usually unnecessary)\n")
+	b.WriteString("- " + in("repomap mcp <path>") + " — STDIO proxy (invoked by Claude Code)\n")
+	b.WriteString("- " + in("repomap events") + " — tail SSE events to terminal\n")
+	b.WriteString("- SSE: " + in("curl -N http://localhost:7374/events") + "\n")
+
+	return b.String()
 }
 
 // validateRoot rejects requests whose project_root doesn't match this server's
