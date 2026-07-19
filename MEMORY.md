@@ -1,0 +1,1 @@
+- [repomap-facts](repomap-facts.md) — the 5 MCP tools, the `explain` prompt, daemon model, registration, and current gaps
