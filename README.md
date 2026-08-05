@@ -314,3 +314,7 @@ daemon — no separate `repomap add` step required.
 - `.env` files are excluded from parsing (no Tree-sitter grammar; explicitly skipped in file filter)
 - SSE stream is localhost-only by default
 - `git_ref` parameter (Phase 2) validated against `[a-zA-Z0-9._~^/-]+` before shell execution
+
+## License
+
+MIT — see [LICENSE](LICENSE).
