@@ -187,7 +187,7 @@ DOCUMENTATION/Architecture.md: (Rank: 3.88)
   14: Subsystem Reference
 ```
 
-For a 500-file vault (~50 MB of prose), `repo_map(map_tokens=8192)` delivers structural orientation at ~1–2% of the raw read cost. Cross-cutting lookups like `get_blast_radius` reduce targeted searches by 5–10× versus scanning each file.
+For a 500-file vault (~2–3 MB of prose, ~500K tokens), `repo_map(map_tokens=8192)` delivers structural orientation at ~1–2% of the raw read cost. Cross-cutting lookups like `get_blast_radius` reduce targeted searches by 5–10× versus scanning each file.
 
 ### When markdown repomap is most useful
 
