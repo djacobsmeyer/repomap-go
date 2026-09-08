@@ -30,3 +30,16 @@ GH issue #1 (find_dead_code FP). 4 workstreams: WS1 parser (8bit, w8:p2, worktre
 
 ---
 
+## Commit 6aa0882e — 2026-09-08 22:11 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+GH issue #1 (find_dead_code FP). 4 workstreams: WS1 parser (8bit, w8:p2, worktree ws/issue1-parser), WS2 orphans (4bit, w8:p3, worktree ws/issue1-orphans) running; WS3 integrate+docs and WS4 QA briefs pre-written in scratchpad. Fix branch fix/issue-1-dead-code-false-positives.
+
+### This Commit's Contribution
+Commit 1ab31e6 on ws/issue1-orphans: DeadCodeOptions, ClassifyFile, OrphanFile.Lang/Category, test/docs orphans hidden by default, MCP params include_test_orphans/include_doc_orphans, 4 tests. Reviewed: build/vet/gofmt/tests clean, prose untouched. WS1 parser still in progress after steer to stop narrating. Pre-existing gofmt issue in internal/daemon/daemon.go deferred to WS3 chore commit.
+
+---
+
