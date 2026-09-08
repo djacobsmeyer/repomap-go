@@ -356,14 +356,14 @@ func (d *Daemon) Status() map[string]interface{} {
 		}
 	}
 	return map[string]interface{}{
-		"pid":              os.Getpid(),
-		"uptime_seconds":   int(time.Since(d.startedAt).Seconds()),
-		"projects":         projects,
-		"project_count":    len(d.projects),
-		"total_tags":       totalTags,
-		"memory_bytes":     totalBytes,
-		"control_socket":   d.socketPath,
-		"sse_addr":         d.sseAddr,
+		"pid":            os.Getpid(),
+		"uptime_seconds": int(time.Since(d.startedAt).Seconds()),
+		"projects":       projects,
+		"project_count":  len(d.projects),
+		"total_tags":     totalTags,
+		"memory_bytes":   totalBytes,
+		"control_socket": d.socketPath,
+		"sse_addr":       d.sseAddr,
 	}
 }
 
