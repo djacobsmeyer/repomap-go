@@ -56,3 +56,16 @@ WS1 commit 6485505 on ws/issue1-parser: insideFunctionScope helper drops Python 
 
 ---
 
+## Commit 6aa09311 — 2026-09-08 22:58 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+WS1 commit 6485505 on ws/issue1-parser: insideFunctionScope helper drops Python function-local variable defs; 30 @name.reference.value captures; 12 parser tests. WS2 commit 1ab31e6 on ws/issue1-orphans: DeadCodeOptions, ClassifyFile, orphan lang/category, hidden test/docs orphans, MCP flags; 4 tests. Next: WS3 integrate+docs in main checkout on fix branch, then WS4 QA.
+
+### This Commit's Contribution
+1579f4f parser, f0e196a graph, 937f072 gofmt chore daemon.go, 237f102 docs (tool description, kinds help, explain prompt row + example 3, README table/accuracy notes/markdown section). go build/vet/gofmt/test clean. Launching WS4 QA (pi 8bit).
+
+---
+
