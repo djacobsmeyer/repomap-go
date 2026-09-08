@@ -105,7 +105,56 @@ const pyQuery = `
 (assignment left: (identifier) @name.definition.variable)
 (call function: (identifier) @name.reference.call)
 (call function: (attribute attribute: (identifier) @name.reference.call))
+(argument_list (identifier) @name.reference.value)
+(keyword_argument value: (identifier) @name.reference.value)
+(pair value: (identifier) @name.reference.value)
+(assignment right: (identifier) @name.reference.value)
+(default_parameter value: (identifier) @name.reference.value)
+(decorator (identifier) @name.reference.value)
+(return_statement (identifier) @name.reference.value)
+(return_statement (expression_list (identifier) @name.reference.value))
+(list (identifier) @name.reference.value)
+(tuple (identifier) @name.reference.value)
+(set (identifier) @name.reference.value)
+(attribute object: (identifier) @name.reference.value)
+(subscript value: (identifier) @name.reference.value)
+(binary_operator left: (identifier) @name.reference.value)
+(binary_operator right: (identifier) @name.reference.value)
+(comparison_operator (identifier) @name.reference.value)
+(boolean_operator left: (identifier) @name.reference.value)
+(boolean_operator right: (identifier) @name.reference.value)
+(unary_operator argument: (identifier) @name.reference.value)
+(not_operator argument: (identifier) @name.reference.value)
+(if_statement condition: (identifier) @name.reference.value)
+(while_statement condition: (identifier) @name.reference.value)
+(for_statement right: (identifier) @name.reference.value)
+(conditional_expression (identifier) @name.reference.value)
+(with_item value: (identifier) @name.reference.value)
+(with_item value: (as_pattern (identifier) @name.reference.value))
+(interpolation expression: (identifier) @name.reference.value)
+(lambda body: (identifier) @name.reference.value)
+(yield (identifier) @name.reference.value)
+(assert_statement (identifier) @name.reference.value)
 `
+
+// insideFunctionScope reports whether node is nested inside any ancestor
+// whose type is one of scopeTypes (e.g. "function_definition", "lambda").
+// The node itself is not checked, only its ancestors up to the root.
+func insideFunctionScope(node *sitter.Node, scopeTypes ...string) bool {
+	if len(scopeTypes) == 0 {
+		return false
+	}
+	want := make(map[string]bool, len(scopeTypes))
+	for _, t := range scopeTypes {
+		want[t] = true
+	}
+	for p := node.Parent(); p != nil; p = p.Parent() {
+		if want[p.Type()] {
+			return true
+		}
+	}
+	return false
+}
 
 // kindFromCapture maps tree-sitter capture names like
 // "name.definition.function" to our granular Kind values.
@@ -217,6 +266,14 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			}
 			node := cap.Node
 			if node == nil {
+				continue
+			}
+			// Python (Class A fix): a variable definition only counts at module
+			// or class-body scope. Assignments inside a function or lambda are
+			// locals, not module-level symbols, so drop them to avoid
+			// false positives in dead-code analysis.
+			if lang == "python" && kind == "variable" &&
+				insideFunctionScope(node, "function_definition", "lambda") {
 				continue
 			}
 			name := node.Content(data)
