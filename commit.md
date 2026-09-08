@@ -43,3 +43,16 @@ Commit 1ab31e6 on ws/issue1-orphans: DeadCodeOptions, ClassifyFile, OrphanFile.L
 
 ---
 
+## Commit 6aa08e2a — 2026-09-08 22:37 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+Commit 1ab31e6 on ws/issue1-orphans: DeadCodeOptions, ClassifyFile, OrphanFile.Lang/Category, test/docs orphans hidden by default, MCP params include_test_orphans/include_doc_orphans, 4 tests. Reviewed: build/vet/gofmt/tests clean, prose untouched. WS1 parser still in progress after steer to stop narrating. Pre-existing gofmt issue in internal/daemon/daemon.go deferred to WS3 chore commit.
+
+### This Commit's Contribution
+WS1 commit 6485505 on ws/issue1-parser: insideFunctionScope helper drops Python function-local variable defs; 30 @name.reference.value captures; 12 parser tests. WS2 commit 1ab31e6 on ws/issue1-orphans: DeadCodeOptions, ClassifyFile, orphan lang/category, hidden test/docs orphans, MCP flags; 4 tests. Next: WS3 integrate+docs in main checkout on fix branch, then WS4 QA.
+
+---
+
