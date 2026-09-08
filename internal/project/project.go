@@ -35,11 +35,11 @@ type Project struct {
 	bus     *events.Bus
 	matcher *ignore.Matcher
 
-	lastMCPCall    time.Time
-	lastReindex    time.Time
-	socketPath     string
-	mcpListener    net.Listener
-	mcpHandler     func(net.Conn)
+	lastMCPCall time.Time
+	lastReindex time.Time
+	socketPath  string
+	mcpListener net.Listener
+	mcpHandler  func(net.Conn)
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -472,8 +472,11 @@ func (p *Project) BlastRadius(symbol, file string, maxDepth int) graph.BlastRadi
 	return res
 }
 
-// FindDeadCode returns symbols defined but never referenced.
-func (p *Project) FindDeadCode(minRank float32, unexportedOnly, exportedOnly bool, kinds []string) graph.DeadCodeResult {
+// FindDeadCode returns symbols defined but never referenced, plus files with
+// no inbound edges and PageRank at or below opts.MinRank. Orphans are labeled
+// with language and category; test and docs orphans are hidden unless
+// opts.IncludeTestOrphans / opts.IncludeDocOrphans is set.
+func (p *Project) FindDeadCode(opts graph.DeadCodeOptions) graph.DeadCodeResult {
 	p.ensureHydrated()
 	p.touchMCP()
 	p.mu.RLock()
@@ -484,7 +487,7 @@ func (p *Project) FindDeadCode(minRank float32, unexportedOnly, exportedOnly boo
 	g := p.graph
 	ranks := p.ranks
 	p.mu.RUnlock()
-	res := graph.FindDeadCode(g, idx, ranks, minRank, unexportedOnly, exportedOnly, kinds)
+	res := graph.FindDeadCode(g, idx, ranks, opts)
 	if p.bus != nil {
 		p.bus.Emit(p.Root, "mcp_call", map[string]interface{}{"tool": "find_dead_code"})
 	}

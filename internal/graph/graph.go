@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -442,8 +443,56 @@ type DeadSymbol struct {
 }
 
 type OrphanFile struct {
-	File string  `json:"file"`
-	Rank float32 `json:"rank"`
+	File     string  `json:"file"`
+	Rank     float32 `json:"rank"`
+	Lang     string  `json:"lang,omitempty"`
+	Category string  `json:"category"`
+}
+
+// ClassifyFile returns the language and category of a file derived purely
+// from its relative path. Lang is parser.FilenameToLang(relpath) ("" for
+// unsupported files). Category is "docs" for markdown files, "test" when the
+// basename matches a common test naming convention (test_*.py, *_test.py,
+// conftest.py, *_test.go, *.test.js/.jsx/.ts/.tsx, *.spec.js/.jsx/.ts/.tsx)
+// or any directory segment is a conventional test directory (tests, test,
+// __tests__, testdata, spec), and "source" otherwise.
+func ClassifyFile(relpath string) (lang, category string) {
+	lang = parser.FilenameToLang(relpath)
+	if lang == "markdown" {
+		return lang, "docs"
+	}
+	if looksLikeTest(relpath) {
+		return lang, "test"
+	}
+	return lang, "source"
+}
+
+// looksLikeTest reports whether a relative path looks like a test file by
+// basename convention or directory segment.
+func looksLikeTest(relpath string) bool {
+	base := filepath.Base(relpath)
+	switch {
+	case strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py"),
+		strings.HasSuffix(base, "_test.py"),
+		base == "conftest.py",
+		strings.HasSuffix(base, "_test.go"),
+		strings.HasSuffix(base, ".test.js"),
+		strings.HasSuffix(base, ".test.jsx"),
+		strings.HasSuffix(base, ".test.ts"),
+		strings.HasSuffix(base, ".test.tsx"),
+		strings.HasSuffix(base, ".spec.js"),
+		strings.HasSuffix(base, ".spec.jsx"),
+		strings.HasSuffix(base, ".spec.ts"),
+		strings.HasSuffix(base, ".spec.tsx"):
+		return true
+	}
+	for _, seg := range strings.Split(relpath, "/") {
+		switch seg {
+		case "tests", "test", "__tests__", "testdata", "spec":
+			return true
+		}
+	}
+	return false
 }
 
 // isUnexported reports whether `name` follows the language's convention for
@@ -467,23 +516,41 @@ func isUnexported(name, lang string) bool {
 	return false
 }
 
+// DeadCodeOptions controls FindDeadCode filtering.
+type DeadCodeOptions struct {
+	// MinRank: orphan candidates with PageRank above this are excluded.
+	MinRank float32
+	// UnexportedOnly keeps only symbols whose name looks unexported in their
+	// language (best signal-to-noise — externally-called code is invisible).
+	UnexportedOnly bool
+	// ExportedOnly keeps only symbols that don't look unexported. Mutually
+	// exclusive with UnexportedOnly; if both are set, no symbols are kept.
+	ExportedOnly bool
+	// Kinds, if non-empty, keeps only symbols whose Kind is in this slice.
+	Kinds []string
+	// IncludeTestOrphans keeps orphans classified as "test" (hidden by
+	// default: test files legitimately have no importers).
+	IncludeTestOrphans bool
+	// IncludeDocOrphans keeps orphans classified as "docs" (hidden by
+	// default: nothing imports a doc).
+	IncludeDocOrphans bool
+}
+
 // FindDeadCode returns symbols defined but never referenced, plus files with
-// no inbound edges and PageRank at or below minRank.
+// no inbound edges and PageRank at or below opts.MinRank.
 //
-// Filters:
-//   - unexportedOnly: keep only symbols whose name looks unexported in their
-//     language (best signal-to-noise — externally-called code is invisible).
-//   - exportedOnly:   keep only symbols that don't look unexported. Mutually
-//     exclusive with unexportedOnly; if both are true, no symbols are kept.
-//   - kinds: if non-empty, keep only symbols whose Kind is in this slice.
+// Symbol filters (see DeadCodeOptions): UnexportedOnly, ExportedOnly (mutually
+// exclusive — both set keeps nothing), and Kinds.
+//
+// Every orphan is labeled with its language and category via ClassifyFile.
+// Orphans in the "test" and "docs" categories are hidden unless
+// opts.IncludeTestOrphans / opts.IncludeDocOrphans is set; the number hidden
+// is reported in the summary.
 func FindDeadCode(
 	g *FileGraph,
 	tagsByFile map[string][]parser.Tag,
 	ranks map[string]float32,
-	minRank float32,
-	unexportedOnly bool,
-	exportedOnly bool,
-	kinds []string,
+	opts DeadCodeOptions,
 ) DeadCodeResult {
 	referenced := map[string]struct{}{}
 	for _, tags := range tagsByFile {
@@ -495,12 +562,12 @@ func FindDeadCode(
 	}
 
 	kindSet := map[string]struct{}{}
-	for _, k := range kinds {
+	for _, k := range opts.Kinds {
 		if k != "" {
 			kindSet[k] = struct{}{}
 		}
 	}
-	mutualExclusion := unexportedOnly && exportedOnly
+	mutualExclusion := opts.UnexportedOnly && opts.ExportedOnly
 
 	var dead []DeadSymbol
 	files := make([]string, 0, len(tagsByFile))
@@ -530,10 +597,10 @@ func FindDeadCode(
 				// Both flags set — silently include nothing.
 				continue
 			}
-			if unexportedOnly && !isUnexported(t.Name, t.Lang) {
+			if opts.UnexportedOnly && !isUnexported(t.Name, t.Lang) {
 				continue
 			}
-			if exportedOnly && isUnexported(t.Name, t.Lang) {
+			if opts.ExportedOnly && isUnexported(t.Name, t.Lang) {
 				continue
 			}
 			dead = append(dead, DeadSymbol{File: f, Name: t.Name, Line: t.Line, Kind: t.Kind})
@@ -541,16 +608,30 @@ func FindDeadCode(
 	}
 
 	var orphans []OrphanFile
+	hiddenTest, hiddenDocs := 0, 0
 	if g != nil {
 		for _, f := range g.Files {
 			if len(g.InvertedEdges[f]) > 0 {
 				continue
 			}
 			r := ranks[f]
-			if r > minRank {
+			if r > opts.MinRank {
 				continue
 			}
-			orphans = append(orphans, OrphanFile{File: f, Rank: r})
+			lang, category := ClassifyFile(f)
+			switch category {
+			case "test":
+				if !opts.IncludeTestOrphans {
+					hiddenTest++
+					continue
+				}
+			case "docs":
+				if !opts.IncludeDocOrphans {
+					hiddenDocs++
+					continue
+				}
+			}
+			orphans = append(orphans, OrphanFile{File: f, Rank: r, Lang: lang, Category: category})
 		}
 		sort.Slice(orphans, func(i, j int) bool { return orphans[i].File < orphans[j].File })
 	}
@@ -561,9 +642,13 @@ func FindDeadCode(
 	if orphans == nil {
 		orphans = []OrphanFile{}
 	}
+	summary := fmt.Sprintf("%d dead symbols, %d orphan files", len(dead), len(orphans))
+	if hidden := hiddenTest + hiddenDocs; hidden > 0 {
+		summary += fmt.Sprintf(" (%d test/docs orphans hidden; set include_test_orphans / include_doc_orphans to show)", hidden)
+	}
 	return DeadCodeResult{
 		DeadSymbols: dead,
 		OrphanFiles: orphans,
-		Summary:     fmt.Sprintf("%d dead symbols, %d orphan files", len(dead), len(orphans)),
+		Summary:     summary,
 	}
 }
