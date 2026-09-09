@@ -36,6 +36,15 @@ func TestFindDeadCodeSchemaGH1(t *testing.T) {
 		}
 	}
 
+	minRank, ok := props["min_rank"].(map[string]any)
+	if !ok {
+		t.Fatal("find_dead_code schema has no min_rank object")
+	}
+	mrDesc, _ := minRank["description"].(string)
+	if !strings.Contains(mrDesc, "at or below") {
+		t.Errorf("min_rank description must say PageRank 'at or below' the value; got: %s", mrDesc)
+	}
+
 	desc, _ := tool["description"].(string)
 	if !strings.Contains(desc, "kinds") {
 		t.Errorf("find_dead_code description does not mention %q; got: %s", "kinds", desc)

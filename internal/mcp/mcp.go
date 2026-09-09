@@ -201,7 +201,7 @@ func (s *Server) toolsList() []map[string]any {
 				"type": "object",
 				"properties": map[string]any{
 					"project_root":         map[string]any{"type": "string"},
-					"min_rank":             map[string]any{"type": "number", "default": 0.001, "description": "Exclude files below this PageRank (entry points and scripts legitimately have no callers)"},
+					"min_rank":             map[string]any{"type": "number", "default": 0.001, "description": "Only files with PageRank at or below this value can be listed in orphan_files; higher-ranked files are excluded because hubs and entry points legitimately attract references. Default 0.001."},
 					"unexported_only":      map[string]any{"type": "boolean", "default": false, "description": "Only return unexported/private symbols. Best signal-to-noise for actionable dead code."},
 					"exported_only":        map[string]any{"type": "boolean", "default": false, "description": "Only return exported/public symbols. High false-positive rate — external callers are invisible to static analysis."},
 					"kinds":                map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Filter by symbol kind: function, method, class, interface, type, variable, constant, def, ref. For Python, \"variable\" means module- or class-level assignments only — function locals are never tagged."},
@@ -312,7 +312,7 @@ func (s *Server) toolFindDeadCode(raw json.RawMessage) (any, *RPCError) {
 	if args.UnexportedOnly && args.ExportedOnly {
 		return nil, &RPCError{Code: codeInvalidParams, Message: "unexported_only and exported_only are mutually exclusive"}
 	}
-	if args.MinRank == 0 {
+	if args.MinRank <= 0 {
 		args.MinRank = 0.001
 	}
 	opts := graph.DeadCodeOptions{
