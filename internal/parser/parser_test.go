@@ -3,8 +3,22 @@ package parser
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
+
+// TestCacheVersionStable: the tag-schema fingerprint is a 64-char hex sha256
+// and deterministic across calls.
+func TestCacheVersionStable(t *testing.T) {
+	v1 := CacheVersion()
+	v2 := CacheVersion()
+	if v1 != v2 {
+		t.Fatalf("CacheVersion() not stable: %q != %q", v1, v2)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(v1) {
+		t.Fatalf("CacheVersion() = %q, want 64 lowercase hex chars", v1)
+	}
+}
 
 // parsePy writes src to a .py fixture in a temp dir and parses it.
 func parsePy(t *testing.T, src string) []Tag {

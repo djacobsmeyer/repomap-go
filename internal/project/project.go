@@ -88,7 +88,7 @@ func (p *Project) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 
-	c, err := cache.Open(p.Root)
+	c, err := cache.Open(p.Root, parser.CacheVersion())
 	if err != nil {
 		return fmt.Errorf("open cache: %w", err)
 	}

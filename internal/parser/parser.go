@@ -2,10 +2,13 @@ package parser
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -136,6 +139,23 @@ const pyQuery = `
 (yield (identifier) @name.reference.value)
 (assert_statement (identifier) @name.reference.value)
 `
+
+// schemaVersion is a manual counter for non-query parser changes (Tag
+// semantics, capture filtering, the markdown parse path). Bump it whenever
+// the parser changes in a way the query strings alone do not capture, so
+// tags cached by an older build are invalidated.
+const schemaVersion = 1
+
+// CacheVersion returns a hex sha256 fingerprint of the parser's tag schema:
+// the schemaVersion counter plus every tree-sitter query and the markdown
+// parse-path marker. Any query edit (or schemaVersion bump) changes the
+// fingerprint, letting the on-disk tag cache detect a stale schema and drop
+// rows parsed by an older build.
+func CacheVersion() string {
+	fingerprint := strconv.Itoa(schemaVersion) + tsQuery + goQuery + pyQuery + "markdown-v1"
+	sum := sha256.Sum256([]byte(fingerprint))
+	return hex.EncodeToString(sum[:])
+}
 
 // insideFunctionScope reports whether node is nested inside any ancestor
 // whose type is one of scopeTypes (e.g. "function_definition", "lambda").
