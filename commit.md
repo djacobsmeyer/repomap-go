@@ -69,3 +69,16 @@ WS1 commit 6485505 on ws/issue1-parser: insideFunctionScope helper drops Python 
 
 ---
 
+## Commit 6aa0af60 — 2026-09-09 00:59 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+1579f4f parser, f0e196a graph, 937f072 gofmt chore daemon.go, 237f102 docs (tool description, kinds help, explain prompt row + example 3, README table/accuracy notes/markdown section). go build/vet/gofmt/test clean. Launching WS4 QA (pi 8bit).
+
+### This Commit's Contribution
+bb0b658 adds project-level e2e test over a Python fixture reproducing classes A/B/C plus true positives, and an MCP schema test. QA findings (not fixed, for follow-up): parser still misses dict keys / except classes / annotations / comprehension iterables / *args refs; min_rank MCP description direction inverted (pre-existing); negative min_rank hides all orphans; spec/ dir classified as test may be over-broad; name-based referenced set means local refs can shadow dead module-level names. Final review via /code-review in progress.
+
+---
+

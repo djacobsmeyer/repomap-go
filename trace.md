@@ -30,3 +30,9 @@ _[Checkpoint: 6aa08e2a — WS1 (parser) and WS2 (orphans) accepted]_
 _[Checkpoint: 6aa09311 — WS3 (integrate+docs) accepted; fix branch has 4 commits]_
 ---
 
+
+
+---
+_[Checkpoint: 6aa0af60 — WS4 (QA) accepted; all 4 workstreams done]_
+---
+
