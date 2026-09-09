@@ -68,7 +68,10 @@ func Open(projectRoot, version string) (*Cache, error) {
 		db.Close()
 		return nil, fmt.Errorf("read parser_version: %w", err)
 	}
-	if err == nil && stored != version {
+	// A missing parser_version (db written by an older build) is treated
+	// exactly like a mismatch: on ErrNoRows `stored` stays "", which can
+	// never equal the fingerprint, so legacy rows are purged on upgrade.
+	if stored != version {
 		if _, err := tx.Exec(`DELETE FROM tags`); err != nil {
 			tx.Rollback()
 			db.Close()

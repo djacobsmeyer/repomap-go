@@ -1,6 +1,9 @@
 package cache
 
 import (
+	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/djacobsmeyer/repomap-go/internal/parser"
@@ -53,5 +56,45 @@ func TestOpenVersionInvalidate(t *testing.T) {
 	defer c4.Close()
 	if got, ok := c4.Get("a.py", 42); !ok || len(got) != 1 {
 		t.Fatalf("after Set under v2 and same-version reopen: Get = (%v, %v), want hit", got, ok)
+	}
+}
+
+// TestOpenLegacyDbWithoutMetaPurges is the upgrade case: a tags.db written
+// by a pre-versioning build has tag rows but NO meta table / parser_version
+// row. Open must treat the missing version like a mismatch and purge the
+// stale rows instead of serving them.
+func TestOpenLegacyDbWithoutMetaPurges(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".repomap")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "tags.db"))
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE tags (
+			file  TEXT PRIMARY KEY,
+			mtime INTEGER NOT NULL,
+			data  TEXT NOT NULL
+		);
+	`); err != nil {
+		t.Fatalf("create legacy tags table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO tags (file, mtime, data) VALUES ('a.py', 42, '[]')`); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	c, err := Open(root, "v1")
+	if err != nil {
+		t.Fatalf("Open over legacy db: %v", err)
+	}
+	defer c.Close()
+	if _, ok := c.Get("a.py", 42); ok {
+		t.Fatal("legacy row survived upgrade to the versioned cache; want miss")
 	}
 }
