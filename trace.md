@@ -60,3 +60,9 @@ _[Checkpoint: 6aa16ae4 — WS5 accepted — mission complete]_
 _[Checkpoint: 6aa17b77 — WS7 self-check dispatched]_
 ---
 
+
+
+---
+_[Checkpoint: 6aa17d0b — WS7 self-check complete: fix validated on vllm-mlx; daemon lifecycle hazards found]_
+---
+

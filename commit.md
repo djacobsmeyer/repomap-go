@@ -134,3 +134,16 @@ Empirical validation: old installed daemon (f142c39) vs new build on repomap-go 
 
 ---
 
+## Commit 6aa17d0b — 2026-09-09 15:36 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+Empirical validation: old installed daemon (f142c39) vs new build on repomap-go (Go: expect identical dead symbols, test/docs orphans hidden) and vllm-mlx (Python: expect issue #1 false positives gone). Measures cache purge+reparse time, verifies meta.parser_version, restores launchd daemon. Instruments in scratchpad/selfcheck/.
+
+### This Commit's Contribution
+vllm-mlx unexported_only: 426 (old) -> 62 (new); kinds recipe 89 -> 26; orphans 42 -> 7 shown + 68 hidden test/docs. repomap-go: Go symbols unchanged except daemon.go 'payload' now marked referenced by a Python fixture ref (cross-language name shadowing, issue #5). Migration: meta table + parser_version fingerprint written, full reparse of vllm-mlx in 3.5s. Hazards: launchctl bootout left old daemon pid 52687 running for 30+ min; when later SIGTERMed it exited in 2s but Go's unix listener unlink-on-close removed the socket now owned by the restored daemon, leaving it unreachable; fixed with launchctl kickstart -k. Daemon now pid 40949, healthy.
+
+---
+
