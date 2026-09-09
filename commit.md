@@ -108,3 +108,16 @@ WS6 (pi 4bit) filed 4 enhancement issues from review findings: #2 parser coverag
 
 ---
 
+## Commit 6aa16ae4 — 2026-09-09 14:19 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+WS6 (pi 4bit) filed 4 enhancement issues from review findings: #2 parser coverage + TS/Go parity, #3 dead-symbol categorization/heuristics/Windows paths, #4 changed_symbols enclosing definition, #5 robustness/perf. WS5 must-fix still running.
+
+### This Commit's Contribution
+fix/issue-1-dead-code-false-positives: 9 commits, 44 tests. Must-fix items landed: cache versioned by parser fingerprint (+legacy purge), local-shadowing edge rule + self/cls dropped, min_rank description/clamp. Follow-ups tracked as GH #2-#5. Branch not pushed; PR and issue reply left to the user.
+
+---
+
