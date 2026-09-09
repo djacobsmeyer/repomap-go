@@ -135,6 +135,10 @@ repomap daemon start          # start background daemon (SSE on :7374)
 repomap daemon stop
 repomap daemon status         # uptime, active projects, memory per-project
 
+# `repomap daemon start` refuses with `daemon already running (pid N, socket
+# P)` when another daemon owns the control socket (it probes the socket
+# before starting); stop that daemon first.
+
 repomap add ~/code/api        # register project → spawn goroutine + watcher
 repomap remove ~/code/api
 repomap list                  # all active projects, index size, last reindex time
@@ -293,6 +297,30 @@ This writes the rendered file to `dist/service/` and prints the exact commands t
 install and enable it (`launchctl load ...` on macOS, `systemctl --user enable
 --now ...` on Linux). It does not copy into your system service directories or
 load/enable anything itself — that step is left to you.
+
+### Upgrading or restarting the daemon
+
+A newly installed binary is not used until the daemon restarts: the STDIO proxy
+(`repomap mcp`) only ever talks to a running daemon and never replaces one, so
+an upgrade that doesn't restart the daemon keeps serving the old code.
+
+To pick up a new binary, restart the daemon. On macOS with the launchd
+LaunchAgent, use a kickstart — it kills and respawns the job in one action. Do
+not use `launchctl bootout` + `bootstrap` for upgrades: it leaves a window with
+no daemon and can strand a duplicate process that launchd no longer owns
+(which is also why `bootout` can appear to "fail to stop" a daemon — it only
+signals the process launchd itself spawned):
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.repomap.daemon
+```
+
+Equivalently, `repomap daemon stop` and let `KeepAlive` respawn it (on Linux:
+`systemctl --user restart repomap`).
+
+Downgrade caveat: an older binary ignores the cache's `meta` table and will
+trust newer-parser rows by mtime — after downgrading, delete `.repomap/tags.db`
+in affected projects (or reindex) so stale rows aren't served.
 
 ### Registering with Claude Code (MCP)
 
