@@ -160,3 +160,16 @@ Closed tabs for WS1-WS7, removed merged worktrees and ws/issue1-* branches. Issu
 
 ---
 
+## Commit 6aa1a9bc — 2026-09-09 18:47 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+Closed tabs for WS1-WS7, removed merged worktrees and ws/issue1-* branches. Issue #6 body drafted from self-check evidence (socket unlink-on-close steals current daemon's socket; no single-instance guard; bootout left daemon alive). WS9 works on fix/issue-6-daemon-lifecycle off main in a new worktree, forbidden from touching the real launchd job.
+
+### This Commit's Contribution
+A e907a9c inode-checked socket unlink; B 4708551 socket-probe single-instance guard (pidfile was a stale sidecar with an unlocked read-check-write); C bc252db shutdown proven bounded by test, bootout incident explained as signal delivery to an orphan proxy-spawned daemon; D 31c6a56 README upgrade section + install-service note. Branch unpushed in worktree ~/sourcecode/repomap-go-ws-daemon. Known nit: active SSE handlers ride out the full 5s shutdown cap. All herdr tabs except mine closed.
+
+---
+

@@ -72,3 +72,9 @@ _[Checkpoint: 6aa17d0b — WS7 self-check complete: fix validated on vllm-mlx; d
 _[Checkpoint: 6aa18674 — Cleanup done; WS8 (file #6) and WS9 (fix #6) dispatched]_
 ---
 
+
+
+---
+_[Checkpoint: 6aa1a9bc — Issue #6 fixed on fix/issue-6-daemon-lifecycle (4 commits), all workstreams closed]_
+---
+
