@@ -121,3 +121,16 @@ fix/issue-1-dead-code-false-positives: 9 commits, 44 tests. Must-fix items lande
 
 ---
 
+## Commit 6aa17b77 — 2026-09-09 15:29 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+fix/issue-1-dead-code-false-positives: 9 commits, 44 tests. Must-fix items landed: cache versioned by parser fingerprint (+legacy purge), local-shadowing edge rule + self/cls dropped, min_rank description/clamp. Follow-ups tracked as GH #2-#5. Branch not pushed; PR and issue reply left to the user.
+
+### This Commit's Contribution
+Empirical validation: old installed daemon (f142c39) vs new build on repomap-go (Go: expect identical dead symbols, test/docs orphans hidden) and vllm-mlx (Python: expect issue #1 false positives gone). Measures cache purge+reparse time, verifies meta.parser_version, restores launchd daemon. Instruments in scratchpad/selfcheck/.
+
+---
+
