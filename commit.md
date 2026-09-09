@@ -82,3 +82,16 @@ bb0b658 adds project-level e2e test over a Python fixture reproducing classes A/
 
 ---
 
+## Commit 6aa160b3 — 2026-09-09 13:35 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+bb0b658 adds project-level e2e test over a Python fixture reproducing classes A/B/C plus true positives, and an MCP schema test. QA findings (not fixed, for follow-up): parser still misses dict keys / except classes / annotations / comprehension iterables / *args refs; min_rank MCP description direction inverted (pre-existing); negative min_rank hides all orphans; spec/ dir classified as test may be over-broad; name-based referenced set means local refs can shadow dead module-level names. Final review via /code-review in progress.
+
+### This Commit's Contribution
+User approved: cache invalidation via parser fingerprint, local-shadowing rule in graph.Build (ref resolves locally when the file defines the name), min_rank description fix + clamp <=0. Follow-ups (parser coverage gaps, test funcs in dead_symbols, dir heuristics/Windows paths, changed_symbols enclosing function, MinRank zero trap, Go/TS parity, query compile caching, name-based shadowing) to be tracked as GitHub issues pending user confirmation.
+
+---
+

@@ -36,3 +36,9 @@ _[Checkpoint: 6aa09311 — WS3 (integrate+docs) accepted; fix branch has 4 commi
 _[Checkpoint: 6aa0af60 — WS4 (QA) accepted; all 4 workstreams done]_
 ---
 
+
+
+---
+_[Checkpoint: 6aa160b3 — Review delivered; WS5 must-fix dispatched]_
+---
+
