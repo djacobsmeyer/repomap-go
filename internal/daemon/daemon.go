@@ -169,7 +169,26 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	<-ctx.Done()
 
-	// Shutdown.
+	// Shutdown guarantees — every step below is bounded, so a SIGTERM always
+	// terminates the process promptly:
+	//  1. sseServer.Shutdown is capped by shutdownCtx (5s): it closes idle
+	//     connections and waits at most that long for active SSE handlers,
+	//     which additionally return as soon as their request context is
+	//     cancelled by the server closing the connection.
+	//  2. Each project's Stop cancels the project's ctx and waits on
+	//     p.done; the project run loop exits on ctx.Done() (it is NOT gated
+	//     on a watcher event), so the wait is bounded by whatever reindex
+	//     batch is in flight.
+	//  3. The control-socket accept loop exits when the listener is closed
+	//     (deferred below); in-flight handleConn goroutines are deliberately
+	//     not waited on — they die with the process.
+	//
+	// The historical "launchctl bootout left the daemon running for 30+ min"
+	// incident was signal DELIVERY, not signal handling: a direct SIGTERM to
+	// the same process stopped it in ~2s. launchd only signals the process
+	// it spawned (the job); a duplicate daemon auto-started by the STDIO
+	// proxy (or started by hand) is an orphan reparented to launchd pid 1
+	// and is invisible to launchctl, so bootout never sent it SIGTERM.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = d.sseServer.Shutdown(shutdownCtx)
