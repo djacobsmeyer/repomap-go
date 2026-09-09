@@ -86,6 +86,13 @@ func New(opts Options) *Daemon {
 // Start runs the daemon until ctx is cancelled (or a signal is received).
 func (d *Daemon) Start(ctx context.Context) error {
 	d.startedAt = time.Now()
+	// Single-instance guard: probe the socket BEFORE touching the socket or
+	// the pidfile. The pidfile alone is not a reliable guard (it can be
+	// stale or missing while a daemon is alive); the socket is the real
+	// single-instance resource.
+	if err := d.checkSocketOwnership(); err != nil {
+		return err
+	}
 	if err := d.writePID(); err != nil {
 		return err
 	}
@@ -174,6 +181,43 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.projects = make(map[string]*project.Project)
 	d.mu.Unlock()
 	return nil
+}
+
+// checkSocketOwnership is the single-instance guard. If the socket path
+// exists, probe it with a 'status' message:
+//   - a live daemon answers -> refuse to start (and do not touch the path);
+//   - nothing answers but the pidfile names a live process -> refuse and
+//     tell the user to stop that pid first;
+//   - nothing answers and no live pid is recorded -> the file is stale;
+//     the caller removes it and proceeds.
+//
+// The guard is deliberately socket-based: the pidfile is a sidecar that can
+// be stale or missing (crash, /tmp cleanup, or a previous exit that deleted
+// it after its socket had been stolen) while a daemon is still alive. A
+// residual TOCTOU remains between this check and net.Listen: two truly
+// concurrent starts can both pass; the second one then fails net.Listen
+// with EADDRINUSE instead of silently stealing the socket.
+func (d *Daemon) checkSocketOwnership() error {
+	if _, err := os.Stat(d.socketPath); err != nil {
+		return nil // no socket file: nothing to guard
+	}
+	resp, probeErr := SendMessageTimeout(d.socketPath, Message{Type: "status"}, time.Second)
+	if probeErr == nil && resp.OK {
+		var st struct {
+			PID int `json:"pid"`
+		}
+		_ = json.Unmarshal(resp.Data, &st)
+		if st.PID <= 0 {
+			if pid, alive := IsRunning(d.pidPath); alive {
+				st.PID = pid
+			}
+		}
+		return fmt.Errorf("daemon already running (pid %d, socket %s)", st.PID, d.socketPath)
+	}
+	if pid, alive := IsRunning(d.pidPath); alive {
+		return fmt.Errorf("daemon already running (pid %d, socket %s has no live responder); stop pid %d first", pid, d.socketPath, pid)
+	}
+	return nil // stale socket file: remove and proceed
 }
 
 func (d *Daemon) writePID() error {
@@ -411,13 +455,14 @@ func errResp(err error) Response {
 
 // --- Client helpers ----------------------------------------------------------
 
-// SendMessage opens the control socket, sends a message, and returns the response.
-func SendMessage(socketPath string, msg Message) (Response, error) {
-	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+// SendMessageTimeout is SendMessage with an explicit dial/read deadline.
+func SendMessageTimeout(socketPath string, msg Message, timeout time.Duration) (Response, error) {
+	conn, err := net.DialTimeout("unix", socketPath, timeout)
 	if err != nil {
 		return Response{}, err
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if err := json.NewEncoder(conn).Encode(msg); err != nil {
 		return Response{}, err
 	}
@@ -426,6 +471,11 @@ func SendMessage(socketPath string, msg Message) (Response, error) {
 		return Response{}, err
 	}
 	return resp, nil
+}
+
+// SendMessage opens the control socket, sends a message, and returns the response.
+func SendMessage(socketPath string, msg Message) (Response, error) {
+	return SendMessageTimeout(socketPath, msg, 2*time.Second)
 }
 
 // IsRunning checks whether a daemon is running at socketPath/pidPath.
