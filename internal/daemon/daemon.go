@@ -96,6 +96,22 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen control socket: %w", err)
 	}
+	// Go's *net.UnixListener unlinks its path on Close by default. Disable
+	// that: by the time we exit, the path may hold a socket file created by
+	// a newer daemon (ours was stolen), and unlinking it would leave that
+	// daemon healthy but unreachable. We remove the file ourselves, and only
+	// if we still own it (see removeSocketIfOwned).
+	if ul, ok := l.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	// Record the inode of the socket file we just created so shutdown can
+	// tell whether the path still holds our file.
+	var socketIno uint64
+	if fi, err := os.Stat(d.socketPath); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			socketIno = st.Ino
+		}
+	}
 	if err := os.Chmod(d.socketPath, 0o600); err != nil {
 		l.Close()
 		return fmt.Errorf("chmod control socket: %w", err)
@@ -103,7 +119,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.listener = l
 	defer func() {
 		l.Close()
-		os.Remove(d.socketPath)
+		removeSocketIfOwned(d.socketPath, socketIno)
 	}()
 
 	// SSE server.
@@ -183,6 +199,23 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return true
+}
+
+// removeSocketIfOwned removes path only if the file currently at path still
+// has inode ino — i.e. it is still the socket file this daemon created. If
+// the path holds a different file (for example a socket created by a newer
+// daemon after our path was stolen), it is left untouched. A missing path is
+// not an error.
+func removeSocketIfOwned(path string, ino uint64) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return // already gone
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Ino != ino {
+		return // not our file anymore
+	}
+	_ = os.Remove(path)
 }
 
 func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
@@ -356,14 +389,14 @@ func (d *Daemon) Status() map[string]interface{} {
 		}
 	}
 	return map[string]interface{}{
-		"pid":              os.Getpid(),
-		"uptime_seconds":   int(time.Since(d.startedAt).Seconds()),
-		"projects":         projects,
-		"project_count":    len(d.projects),
-		"total_tags":       totalTags,
-		"memory_bytes":     totalBytes,
-		"control_socket":   d.socketPath,
-		"sse_addr":         d.sseAddr,
+		"pid":            os.Getpid(),
+		"uptime_seconds": int(time.Since(d.startedAt).Seconds()),
+		"projects":       projects,
+		"project_count":  len(d.projects),
+		"total_tags":     totalTags,
+		"memory_bytes":   totalBytes,
+		"control_socket": d.socketPath,
+		"sse_addr":       d.sseAddr,
 	}
 }
 
