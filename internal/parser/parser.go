@@ -300,6 +300,12 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			if name == "" {
 				continue
 			}
+			// Python: `self` / `cls` can never resolve to a module-level
+			// definition; drop their ref captures (they only add edge
+			// volume).
+			if lang == "python" && kind == "ref" && (name == "self" || name == "cls") {
+				continue
+			}
 			tags = append(tags, Tag{
 				RelFile: relpath,
 				Line:    int(node.StartPoint().Row) + 1,

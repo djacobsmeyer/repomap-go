@@ -128,6 +128,13 @@ func Build(tagsByFile map[string][]parser.Tag, resolveRef func(name, relFile str
 			continue
 		}
 		for refFile := range b.refs {
+			// Local-shadowing rule: if the referencing file also DEFINES this
+			// name, the reference resolves locally (module-level shadow) and
+			// creates no cross-file edge. Per-name, not per-file: other names
+			// in the same bucket/loop still edge as usual.
+			if _, local := b.defs[refFile]; local {
+				continue
+			}
 			for defFile := range b.defs {
 				if refFile == defFile {
 					continue

@@ -171,6 +171,27 @@ func TestPythonDecoratorRef(t *testing.T) {
 	}
 }
 
+// TestPythonSelfClsRefsDropped: `self` / `cls` attribute-object refs are
+// dropped (they can never resolve to a module-level definition); other
+// attribute objects are still refs.
+func TestPythonSelfClsRefsDropped(t *testing.T) {
+	src := "class C:\n" +
+		"    def m(self):\n" +
+		"        self.x\n" +
+		"        cls.y\n" +
+		"        obj.x\n"
+	tags := parsePy(t, src)
+	if hasTag(tags, "self", "ref") {
+		t.Errorf("self must not produce a ref tag; got %+v", tags)
+	}
+	if hasTag(tags, "cls", "ref") {
+		t.Errorf("cls must not produce a ref tag; got %+v", tags)
+	}
+	if !hasTag(tags, "obj", "ref") {
+		t.Errorf("expected ref obj for obj.x; got %+v", tags)
+	}
+}
+
 // TestPythonExistingBehaviorPreserved: the pre-existing capture behavior
 // (call refs, attribute-call refs, function/class defs) is unchanged.
 func TestPythonExistingBehaviorPreserved(t *testing.T) {
