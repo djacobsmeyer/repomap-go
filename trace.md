@@ -66,3 +66,9 @@ _[Checkpoint: 6aa17b77 — WS7 self-check dispatched]_
 _[Checkpoint: 6aa17d0b — WS7 self-check complete: fix validated on vllm-mlx; daemon lifecycle hazards found]_
 ---
 
+
+
+---
+_[Checkpoint: 6aa18674 — Cleanup done; WS8 (file #6) and WS9 (fix #6) dispatched]_
+---
+

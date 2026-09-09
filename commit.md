@@ -147,3 +147,16 @@ vllm-mlx unexported_only: 426 (old) -> 62 (new); kinds recipe 89 -> 26; orphans 
 
 ---
 
+## Commit 6aa18674 — 2026-09-09 16:16 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+vllm-mlx unexported_only: 426 (old) -> 62 (new); kinds recipe 89 -> 26; orphans 42 -> 7 shown + 68 hidden test/docs. repomap-go: Go symbols unchanged except daemon.go 'payload' now marked referenced by a Python fixture ref (cross-language name shadowing, issue #5). Migration: meta table + parser_version fingerprint written, full reparse of vllm-mlx in 3.5s. Hazards: launchctl bootout left old daemon pid 52687 running for 30+ min; when later SIGTERMed it exited in 2s but Go's unix listener unlink-on-close removed the socket now owned by the restored daemon, leaving it unreachable; fixed with launchctl kickstart -k. Daemon now pid 40949, healthy.
+
+### This Commit's Contribution
+Closed tabs for WS1-WS7, removed merged worktrees and ws/issue1-* branches. Issue #6 body drafted from self-check evidence (socket unlink-on-close steals current daemon's socket; no single-instance guard; bootout left daemon alive). WS9 works on fix/issue-6-daemon-lifecycle off main in a new worktree, forbidden from touching the real launchd job.
+
+---
+
