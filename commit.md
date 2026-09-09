@@ -95,3 +95,16 @@ User approved: cache invalidation via parser fingerprint, local-shadowing rule i
 
 ---
 
+## Commit 6aa1633b — 2026-09-09 13:46 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+User approved: cache invalidation via parser fingerprint, local-shadowing rule in graph.Build (ref resolves locally when the file defines the name), min_rank description fix + clamp <=0. Follow-ups (parser coverage gaps, test funcs in dead_symbols, dir heuristics/Windows paths, changed_symbols enclosing function, MinRank zero trap, Go/TS parity, query compile caching, name-based shadowing) to be tracked as GitHub issues pending user confirmation.
+
+### This Commit's Contribution
+WS6 (pi 4bit) filed 4 enhancement issues from review findings: #2 parser coverage + TS/Go parity, #3 dead-symbol categorization/heuristics/Windows paths, #4 changed_symbols enclosing definition, #5 robustness/perf. WS5 must-fix still running.
+
+---
+

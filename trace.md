@@ -42,3 +42,9 @@ _[Checkpoint: 6aa0af60 — WS4 (QA) accepted; all 4 workstreams done]_
 _[Checkpoint: 6aa160b3 — Review delivered; WS5 must-fix dispatched]_
 ---
 
+
+
+---
+_[Checkpoint: 6aa1633b — Follow-up issues #2-#5 filed]_
+---
+
