@@ -226,6 +226,156 @@ func TestPythonKeywordArgumentNameNotRef(t *testing.T) {
 	}
 }
 
+// TestPythonDictKeyRef: a bare identifier used as a dict literal KEY is a
+// reference (GH-2; only pair value: was captured before).
+func TestPythonDictKeyRef(t *testing.T) {
+	tags := parsePy(t, "d = {_KEY_FN: 1}\n")
+	if !hasTag(tags, "_KEY_FN", "ref") {
+		t.Errorf("expected ref _KEY_FN for dict key; got %+v", tags)
+	}
+}
+
+// TestPythonExceptRaiseRefs: except targets (bare, tuple, as-pattern) and
+// raise targets (bare, from-cause) are references (GH-2).
+func TestPythonExceptRaiseRefs(t *testing.T) {
+	src := "try:\n" +
+		"    pass\n" +
+		"except _ErrA:\n" +
+		"    pass\n" +
+		"except (_ErrB, _ErrC) as _e:\n" +
+		"    pass\n" +
+		"raise _ErrD\n" +
+		"raise _ErrE from _cause\n"
+	tags := parsePy(t, src)
+	for _, name := range []string{"_ErrA", "_ErrB", "_ErrC", "_ErrD", "_ErrE", "_cause"} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected ref %q; got %+v", name, tags)
+		}
+	}
+	// The as-alias is a definition position, not a ref.
+	if hasTag(tags, "_e", "ref") {
+		t.Errorf("except as-alias _e must not be a ref; got %+v", tags)
+	}
+}
+
+// TestPythonAnnotationRefs: type annotations (variable, parameter, return,
+// including the `type` wrapper node) are references (GH-2).
+func TestPythonAnnotationRefs(t *testing.T) {
+	src := "x: _T = 1\n" +
+		"y: _T2\n" +
+		"def f(a: _T3, b: _T4 = _dflt) -> _R:\n" +
+		"    z: _T5 = 2\n" +
+		"    return z\n"
+	tags := parsePy(t, src)
+	for _, name := range []string{"_T", "_T2", "_T3", "_T4", "_dflt", "_R", "_T5"} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected ref %q; got %+v", name, tags)
+		}
+	}
+}
+
+// TestPythonComprehensionRefs: comprehension iterables, element bodies and
+// conditions are references; the for-target is not (GH-2).
+func TestPythonComprehensionRefs(t *testing.T) {
+	src := "a = [g(_el1) for _tg1 in _items if _pred]\n" +
+		"b = {_el2 for _tg2 in _items2 if _pred2}\n" +
+		"c = (_el3 for _tg3 in _items3)\n" +
+		"d = {_el4: _el4b for _tg4 in _items4 if _pred4}\n"
+	tags := parsePy(t, src)
+	for _, name := range []string{"g", "_el1", "_items", "_pred", "_el2", "_items2", "_pred2", "_el3", "_items3", "_el4", "_el4b", "_items4", "_pred4"} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected ref %q; got %+v", name, tags)
+		}
+	}
+	// The for-targets are definition positions, not refs.
+	for _, name := range []string{"_tg1", "_tg2", "_tg3", "_tg4"} {
+		if hasTag(tags, name, "ref") {
+			t.Errorf("comprehension for-target %s must not be a ref; got %+v", name, tags)
+		}
+	}
+}
+
+// TestPythonSplatAwaitAugmentedRefs: splats in calls and literals, await,
+// and augmented-assignment RHS are references (GH-2).
+func TestPythonSplatAwaitAugmentedRefs(t *testing.T) {
+	src := "f(*_args, **_kw)\n" +
+		"l = [*_args2, 1]\n" +
+		"d = {**_kw2}\n" +
+		"async def h():\n" +
+		"    await _coro\n" +
+		"total += _STEP\n"
+	tags := parsePy(t, src)
+	for _, name := range []string{"_args", "_kw", "_args2", "_kw2", "_coro", "_STEP"} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected ref %q; got %+v", name, tags)
+		}
+	}
+}
+
+// TestPythonElifSliceDelParenSubscriptIndexRefs: elif conditions, slice
+// bounds, del targets, parenthesized expressions, and subscript indices are
+// references (GH-2).
+func TestPythonElifSliceDelParenSubscriptIndexRefs(t *testing.T) {
+	src := "if _c1:\n" +
+		"    pass\n" +
+		"elif _c2:\n" +
+		"    pass\n" +
+		"b = a[_lo:_hi]\n" +
+		"del _x\n" +
+		"p = (_p1)\n" +
+		"c = _cache[_key]\n"
+	tags := parsePy(t, src)
+	for _, name := range []string{"_c2", "_lo", "_hi", "_x", "_p1", "_key"} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected ref %q; got %+v", name, tags)
+		}
+	}
+}
+
+// TestPythonNonCallAttributeReadRef: a class attribute read via
+// self._cache (never called) is a reference, keeping the class-attribute
+// definition alive (GH-2).
+func TestPythonNonCallAttributeReadRef(t *testing.T) {
+	src := "class C:\n" +
+		"    _cache = {}\n" +
+		"    _registry = {}\n" +
+		"    def m(self):\n" +
+		"        self._cache[1]\n" +
+		"        cls._registry\n" +
+		"D._x\n"
+	tags := parsePy(t, src)
+	if !hasTag(tags, "_cache", "variable") {
+		t.Errorf("missing variable def _cache; got %+v", tags)
+	}
+	if !hasTag(tags, "_cache", "ref") {
+		t.Errorf("expected ref _cache from self._cache read; got %+v", tags)
+	}
+	if !hasTag(tags, "_registry", "ref") {
+		t.Errorf("expected ref _registry from cls._registry read; got %+v", tags)
+	}
+	if !hasTag(tags, "_x", "ref") {
+		t.Errorf("expected ref _x from D._x read; got %+v", tags)
+	}
+	if hasTag(tags, "self", "ref") || hasTag(tags, "cls", "ref") {
+		t.Errorf("self/cls must not be refs; got %+v", tags)
+	}
+}
+
+// TestPythonParamAndKwargNamesNotRefs: parameter names and keyword-argument
+// names are definition positions, never refs (GH-2 regression guard).
+func TestPythonParamAndKwargNamesNotRefs(t *testing.T) {
+	tags := parsePy(t, "def f(_pname, _kwonly=_val):\n    g(_kwname=1)\n")
+	if hasTag(tags, "_pname", "ref") {
+		t.Errorf("parameter name _pname must not be a ref; got %+v", tags)
+	}
+	if hasTag(tags, "_kwname", "ref") {
+		t.Errorf("keyword argument name _kwname must not be a ref; got %+v", tags)
+	}
+	if !hasTag(tags, "_val", "ref") {
+		t.Errorf("expected ref _val for default value; got %+v", tags)
+	}
+}
+
 // TestPythonValuePositionRefs: every additional value position added to
 // pyQuery produces a reference, and definition positions (for-loop target,
 // with-alias) do not.
