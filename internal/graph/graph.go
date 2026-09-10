@@ -462,8 +462,11 @@ type OrphanFile struct {
 // unsupported files). Category is "docs" for markdown files, "test" when the
 // basename matches a common test naming convention (test_*.py, *_test.py,
 // conftest.py, *_test.go, *.test.js/.jsx/.ts/.tsx, *.spec.js/.jsx/.ts/.tsx)
-// or any directory segment is a conventional test directory (tests, test,
-// __tests__, testdata, spec), and "source" otherwise.
+// or a directory segment is a conventional test directory: "tests",
+// "__tests__" or "testdata" anywhere in the path, or "test" when it is the
+// file's immediate parent directory (so packages like internal/test/util
+// keep their non-test files as source, and spec/ is never a test directory).
+// Otherwise the category is "source".
 func ClassifyFile(relpath string) (lang, category string) {
 	lang = parser.FilenameToLang(relpath)
 	if lang == "markdown" {
@@ -476,7 +479,10 @@ func ClassifyFile(relpath string) (lang, category string) {
 }
 
 // looksLikeTest reports whether a relative path looks like a test file by
-// basename convention or directory segment.
+// basename convention or directory segment. Directory rules: "tests",
+// "__tests__" and "testdata" match anywhere in the path; "test" matches only
+// as the file's immediate parent directory; "spec" is not a test directory
+// (e.g. myapp/spec/openapi.py is source).
 func looksLikeTest(relpath string) bool {
 	base := filepath.Base(relpath)
 	switch {
@@ -494,10 +500,18 @@ func looksLikeTest(relpath string) bool {
 		strings.HasSuffix(base, ".spec.tsx"):
 		return true
 	}
-	for _, seg := range strings.Split(relpath, "/") {
+	segs := strings.Split(relpath, "/")
+	for i, seg := range segs {
 		switch seg {
-		case "tests", "test", "__tests__", "testdata", "spec":
+		case "tests", "__tests__", "testdata":
 			return true
+		case "test":
+			// Immediate parent directory only (the segment right before the
+			// basename), so nested packages like internal/test/util are not
+			// swallowed whole.
+			if i == len(segs)-2 {
+				return true
+			}
 		}
 	}
 	return false

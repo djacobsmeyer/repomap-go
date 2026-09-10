@@ -19,6 +19,9 @@ func TestClassifyFile(t *testing.T) {
 		{"src/a.spec.ts", "typescript", "test"},
 		{"conftest.py", "python", "test"},
 		{"pkg/testdata/x.py", "python", "test"},
+		{"myapp/spec/openapi.py", "python", "source"},
+		{"internal/test/harness.go", "go", "test"},
+		{"internal/test/util/helpers.go", "go", "source"},
 		{"src/engine.py", "python", "source"},
 		{"internal/x.go", "go", "source"},
 	}
