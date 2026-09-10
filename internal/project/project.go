@@ -264,6 +264,7 @@ func (p *Project) handleChanges(files []string) {
 		})
 	}
 	for _, rel := range files {
+		rel = filepath.ToSlash(rel)
 		abs := filepath.Join(p.Root, rel)
 		if p.bus != nil {
 			p.bus.Emit(p.Root, "file_changed", map[string]interface{}{"file": rel})
@@ -320,6 +321,7 @@ func (p *Project) initialIndex() error {
 			return nil
 		}
 		rel, _ := filepath.Rel(p.Root, path)
+		rel = filepath.ToSlash(rel)
 		if info.IsDir() {
 			if rel != "." && p.matcher != nil && p.matcher.ShouldIgnore(path, true) {
 				return filepath.SkipDir

@@ -468,6 +468,9 @@ type OrphanFile struct {
 // keep their non-test files as source, and spec/ is never a test directory).
 // Otherwise the category is "source".
 func ClassifyFile(relpath string) (lang, category string) {
+	// Tolerate Windows backslash paths: normalize to slash form at entry so
+	// segment-based rules behave identically on every platform.
+	relpath = strings.ReplaceAll(relpath, "\\", "/")
 	lang = parser.FilenameToLang(relpath)
 	if lang == "markdown" {
 		return lang, "docs"
@@ -484,6 +487,7 @@ func ClassifyFile(relpath string) (lang, category string) {
 // as the file's immediate parent directory; "spec" is not a test directory
 // (e.g. myapp/spec/openapi.py is source).
 func looksLikeTest(relpath string) bool {
+	relpath = strings.ReplaceAll(relpath, "\\", "/")
 	base := filepath.Base(relpath)
 	switch {
 	case strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py"),

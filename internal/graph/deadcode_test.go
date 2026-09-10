@@ -24,6 +24,9 @@ func TestClassifyFile(t *testing.T) {
 		{"internal/test/util/helpers.go", "go", "source"},
 		{"src/engine.py", "python", "source"},
 		{"internal/x.go", "go", "source"},
+		// GH-3: Windows backslash paths must classify identically.
+		{"tests\\helpers.py", "python", "test"},
+		{"docs\\x.md", "markdown", "docs"},
 	}
 	for _, tc := range cases {
 		lang, category := ClassifyFile(tc.relpath)
