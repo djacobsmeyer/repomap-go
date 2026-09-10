@@ -88,6 +88,7 @@ const tsQuery = `
 (interface_declaration name: (type_identifier) @name.definition.interface)
 (type_alias_declaration name: (type_identifier) @name.definition.type)
 (variable_declarator name: (identifier) @name.definition.variable)
+(public_field_definition name: (property_identifier) @name.definition.variable)
 (call_expression function: (identifier) @name.reference.call)
 (call_expression function: (member_expression property: (property_identifier) @name.reference.call))
 `
@@ -317,6 +318,21 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			// false positives in dead-code analysis.
 			if lang == "python" && kind == "variable" &&
 				insideFunctionScope(node, "function_definition", "lambda") {
+				continue
+			}
+			// TypeScript/JavaScript (Class A fix, GH-2): a variable_declarator
+			// inside a function body is a local. Package-level and class-field
+			// declarations (no function ancestor) stay.
+			if (lang == "typescript" || lang == "javascript") && kind == "variable" &&
+				insideFunctionScope(node, "function_declaration", "function_expression",
+					"arrow_function", "method_definition",
+					"generator_function_declaration", "generator_function_expression") {
+				continue
+			}
+			// Go (Class A fix, GH-2): var/const specs inside a function or
+			// method body are locals. Package-level declarations stay.
+			if lang == "go" && (kind == "variable" || kind == "constant") &&
+				insideFunctionScope(node, "function_declaration", "method_declaration", "func_literal") {
 				continue
 			}
 			name := node.Content(data)

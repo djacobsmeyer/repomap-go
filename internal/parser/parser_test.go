@@ -23,8 +23,25 @@ func TestCacheVersionStable(t *testing.T) {
 // parsePy writes src to a .py fixture in a temp dir and parses it.
 func parsePy(t *testing.T, src string) []Tag {
 	t.Helper()
+	return parseFixture(t, "fixture.py", src)
+}
+
+// parseTS writes src to a .ts fixture in a temp dir and parses it.
+func parseTS(t *testing.T, src string) []Tag {
+	t.Helper()
+	return parseFixture(t, "fixture.ts", src)
+}
+
+// parseGo writes src to a .go fixture in a temp dir and parses it.
+func parseGo(t *testing.T, src string) []Tag {
+	t.Helper()
+	return parseFixture(t, "fixture.go", src)
+}
+
+// parseFixture writes src to rel in a temp dir and parses it.
+func parseFixture(t *testing.T, rel, src string) []Tag {
+	t.Helper()
 	dir := t.TempDir()
-	rel := "fixture.py"
 	if err := os.WriteFile(filepath.Join(dir, rel), []byte(src), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
@@ -442,5 +459,133 @@ func TestPythonValuePositionRefs(t *testing.T) {
 	// Locals assigned in the function body are not variable defs.
 	if hasDefTag(tags, "a") || hasDefTag(tags, "x") || hasDefTag(tags, "l") {
 		t.Errorf("function-local assignments must not be variable defs; got %+v", tags)
+	}
+}
+
+// TestTSFunctionLocalVariableDefsDropped: variable_declarators inside
+// function bodies (declaration, expression, arrow, method, generator) are
+// locals and must NOT produce definition tags (Class A, GH-2).
+func TestTSFunctionLocalVariableDefsDropped(t *testing.T) {
+	src := "function f() { const _x1 = 1; let _x2 = 2; }\n" +
+		"const g = function () { const _x3 = 3; };\n" +
+		"const h = () => { const _x4 = 4; };\n" +
+		"class C {\n" +
+		"    method() { const _x5 = 5; }\n" +
+		"}\n" +
+		"function* gen() { const _x6 = 6; }\n"
+	tags := parseTS(t, src)
+	for _, name := range []string{"_x1", "_x2", "_x3", "_x4", "_x5", "_x6"} {
+		if hasDefTag(tags, name) {
+			t.Errorf("function-local %s must not be a definition; got %+v", name, tags)
+		}
+	}
+	// The enclosing function is still defined.
+	if !hasTag(tags, "f", "function") {
+		t.Errorf("expected function def f; got %+v", tags)
+	}
+}
+
+// TestTSModuleLevelAndClassFieldDefsKept: package-level variable_declarators
+// and class fields keep their definition tags (Class A, GH-2).
+func TestTSModuleLevelAndClassFieldDefsKept(t *testing.T) {
+	src := "const _MODULE_VAR = 1;\n" +
+		"let _MODULE_LET = 2;\n" +
+		"class C {\n" +
+		"    _field = 3;\n" +
+		"}\n"
+	tags := parseTS(t, src)
+	for _, name := range []string{"_MODULE_VAR", "_MODULE_LET", "_field"} {
+		if !hasTag(tags, name, "variable") {
+			t.Errorf("missing variable def %s; got %+v", name, tags)
+		}
+	}
+	if !hasTag(tags, "C", "class") {
+		t.Errorf("expected class def C; got %+v", tags)
+	}
+}
+
+// TestTSNestedFunctionLocalDropped: a declarator inside an arrow function
+// nested in a function is still local (Class A, GH-2).
+func TestTSNestedFunctionLocalDropped(t *testing.T) {
+	src := "function outer() {\n" +
+		"    const inner = () => { const _nested = 1; return _nested; };\n" +
+		"    return inner;\n" +
+		"}\n"
+	tags := parseTS(t, src)
+	if hasDefTag(tags, "_nested") {
+		t.Errorf("nested-function-local _nested must not be a definition; got %+v", tags)
+	}
+	if !hasTag(tags, "outer", "function") {
+		t.Errorf("expected function def outer; got %+v", tags)
+	}
+}
+
+// TestGoFunctionLocalVarConstDefsDropped: var/const specs inside function
+// and method bodies are locals and must NOT produce definition tags
+// (Class A, GH-2).
+func TestGoFunctionLocalVarConstDefsDropped(t *testing.T) {
+	src := "package p\n" +
+		"\n" +
+		"func f() {\n" +
+		"\tvx int\n" +
+		"\tconst cy = 1\n" +
+		"\t_ = vx\n" +
+		"\t_ = cy\n" +
+		"}\n" +
+		"\n" +
+		"type R struct{}\n" +
+		"\n" +
+		"func (r R) m() {\n" +
+		"\tvar vm int\n" +
+		"\tconst cm = 2\n" +
+		"\t_ = vm\n" +
+		"\t_ = cm\n" +
+		"}\n"
+	tags := parseGo(t, src)
+	for _, name := range []string{"vx", "cy", "vm", "cm"} {
+		if hasDefTag(tags, name) {
+			t.Errorf("function-local %s must not be a definition; got %+v", name, tags)
+		}
+	}
+	if !hasTag(tags, "f", "function") || !hasTag(tags, "m", "method") {
+		t.Errorf("expected function def f and method def m; got %+v", tags)
+	}
+}
+
+// TestGoPackageLevelVarConstDefsKept: package-level var/const declarations
+// keep their definition tags (Class A, GH-2).
+func TestGoPackageLevelVarConstDefsKept(t *testing.T) {
+	src := "package p\n" +
+		"\n" +
+		"var GV int\n" +
+		"\n" +
+		"const KC = 1\n"
+	tags := parseGo(t, src)
+	if !hasTag(tags, "GV", "variable") {
+		t.Errorf("missing variable def GV; got %+v", tags)
+	}
+	if !hasTag(tags, "KC", "constant") {
+		t.Errorf("missing constant def KC; got %+v", tags)
+	}
+}
+
+// TestGoFuncLiteralLocalDropped: a var spec inside a func literal nested in
+// a function is still local (Class A, GH-2).
+func TestGoFuncLiteralLocalDropped(t *testing.T) {
+	src := "package p\n" +
+		"\n" +
+		"func outer() {\n" +
+		"\th := func() {\n" +
+		"\t\tvar nested int\n" +
+		"\t\t_ = nested\n" +
+		"\t}\n" +
+		"\t_ = h\n" +
+		"}\n"
+	tags := parseGo(t, src)
+	if hasDefTag(tags, "nested") {
+		t.Errorf("func-literal-local nested must not be a definition; got %+v", tags)
+	}
+	if !hasTag(tags, "outer", "function") {
+		t.Errorf("expected function def outer; got %+v", tags)
 	}
 }
