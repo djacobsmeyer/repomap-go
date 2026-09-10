@@ -443,10 +443,11 @@ type DeadCodeResult struct {
 }
 
 type DeadSymbol struct {
-	File string `json:"file"`
-	Name string `json:"name"`
-	Line int    `json:"line"`
-	Kind string `json:"kind"`
+	File     string `json:"file"`
+	Name     string `json:"name"`
+	Line     int    `json:"line"`
+	Kind     string `json:"kind"`
+	Category string `json:"category"`
 }
 
 type OrphanFile struct {
@@ -541,6 +542,10 @@ type DeadCodeOptions struct {
 	// IncludeDocOrphans keeps orphans classified as "docs" (hidden by
 	// default: nothing imports a doc).
 	IncludeDocOrphans bool
+	// IncludeTestSymbols keeps dead symbols defined in files classified as
+	// "test" (hidden by default: test functions are discovered by the test
+	// runner and never referenced by name).
+	IncludeTestSymbols bool
 }
 
 // FindDeadCode returns symbols defined but never referenced, plus files with
@@ -553,6 +558,11 @@ type DeadCodeOptions struct {
 // Orphans in the "test" and "docs" categories are hidden unless
 // opts.IncludeTestOrphans / opts.IncludeDocOrphans is set; the number hidden
 // is reported in the summary.
+//
+// Every dead symbol is labeled with its file's category via ClassifyFile.
+// Symbols defined in "test" files are hidden unless opts.IncludeTestSymbols
+// is set; the number hidden is reported in the summary. Docs symbols are
+// never hidden — knowledge-base users rely on them.
 func FindDeadCode(
 	g *FileGraph,
 	tagsByFile map[string][]parser.Tag,
@@ -577,12 +587,14 @@ func FindDeadCode(
 	mutualExclusion := opts.UnexportedOnly && opts.ExportedOnly
 
 	var dead []DeadSymbol
+	hiddenTestSymbols := 0
 	files := make([]string, 0, len(tagsByFile))
 	for f := range tagsByFile {
 		files = append(files, f)
 	}
 	sort.Strings(files)
 	for _, f := range files {
+		_, category := ClassifyFile(f)
 		tags := tagsByFile[f]
 		// Stable order by line.
 		ordered := make([]parser.Tag, len(tags))
@@ -610,7 +622,11 @@ func FindDeadCode(
 			if opts.ExportedOnly && isUnexported(t.Name, t.Lang) {
 				continue
 			}
-			dead = append(dead, DeadSymbol{File: f, Name: t.Name, Line: t.Line, Kind: t.Kind})
+			if category == "test" && !opts.IncludeTestSymbols {
+				hiddenTestSymbols++
+				continue
+			}
+			dead = append(dead, DeadSymbol{File: f, Name: t.Name, Line: t.Line, Kind: t.Kind, Category: category})
 		}
 	}
 
@@ -650,8 +666,15 @@ func FindDeadCode(
 		orphans = []OrphanFile{}
 	}
 	summary := fmt.Sprintf("%d dead symbols, %d orphan files", len(dead), len(orphans))
+	var hiddenClauses []string
+	if hiddenTestSymbols > 0 {
+		hiddenClauses = append(hiddenClauses, fmt.Sprintf("%d test symbols hidden; set include_test_symbols to show", hiddenTestSymbols))
+	}
 	if hidden := hiddenTest + hiddenDocs; hidden > 0 {
-		summary += fmt.Sprintf(" (%d test/docs orphans hidden; set include_test_orphans / include_doc_orphans to show)", hidden)
+		hiddenClauses = append(hiddenClauses, fmt.Sprintf("%d test/docs orphans hidden; set include_test_orphans / include_doc_orphans to show", hidden))
+	}
+	if len(hiddenClauses) > 0 {
+		summary += " (" + strings.Join(hiddenClauses, "; ") + ")"
 	}
 	return DeadCodeResult{
 		DeadSymbols: dead,
