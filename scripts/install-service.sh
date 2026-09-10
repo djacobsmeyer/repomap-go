@@ -37,6 +37,10 @@ Darwin)
 	echo "  mkdir -p $LOG_DIR"
 	echo "  cp $out ~/Library/LaunchAgents/com.repomap.daemon.plist"
 	echo "  launchctl load ~/Library/LaunchAgents/com.repomap.daemon.plist"
+	echo
+	echo "To upgrade/restart an already-installed daemon, kickstart it (do not use"
+	echo "bootout+bootstrap — see README 'Upgrading or restarting the daemon'):"
+	echo "  launchctl kickstart -k gui/$(id -u)/com.repomap.daemon"
 	;;
 Linux)
 	template="$ROOT_DIR/contrib/systemd/repomap.service.tmpl"

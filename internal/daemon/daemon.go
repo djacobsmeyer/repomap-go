@@ -86,6 +86,13 @@ func New(opts Options) *Daemon {
 // Start runs the daemon until ctx is cancelled (or a signal is received).
 func (d *Daemon) Start(ctx context.Context) error {
 	d.startedAt = time.Now()
+	// Single-instance guard: probe the socket BEFORE touching the socket or
+	// the pidfile. The pidfile alone is not a reliable guard (it can be
+	// stale or missing while a daemon is alive); the socket is the real
+	// single-instance resource.
+	if err := d.checkSocketOwnership(); err != nil {
+		return err
+	}
 	if err := d.writePID(); err != nil {
 		return err
 	}
@@ -96,6 +103,22 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen control socket: %w", err)
 	}
+	// Go's *net.UnixListener unlinks its path on Close by default. Disable
+	// that: by the time we exit, the path may hold a socket file created by
+	// a newer daemon (ours was stolen), and unlinking it would leave that
+	// daemon healthy but unreachable. We remove the file ourselves, and only
+	// if we still own it (see removeSocketIfOwned).
+	if ul, ok := l.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	// Record the inode of the socket file we just created so shutdown can
+	// tell whether the path still holds our file.
+	var socketIno uint64
+	if fi, err := os.Stat(d.socketPath); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			socketIno = st.Ino
+		}
+	}
 	if err := os.Chmod(d.socketPath, 0o600); err != nil {
 		l.Close()
 		return fmt.Errorf("chmod control socket: %w", err)
@@ -103,7 +126,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.listener = l
 	defer func() {
 		l.Close()
-		os.Remove(d.socketPath)
+		removeSocketIfOwned(d.socketPath, socketIno)
 	}()
 
 	// SSE server.
@@ -146,7 +169,26 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	<-ctx.Done()
 
-	// Shutdown.
+	// Shutdown guarantees — every step below is bounded, so a SIGTERM always
+	// terminates the process promptly:
+	//  1. sseServer.Shutdown is capped by shutdownCtx (5s): it closes idle
+	//     connections and waits at most that long for active SSE handlers,
+	//     which additionally return as soon as their request context is
+	//     cancelled by the server closing the connection.
+	//  2. Each project's Stop cancels the project's ctx and waits on
+	//     p.done; the project run loop exits on ctx.Done() (it is NOT gated
+	//     on a watcher event), so the wait is bounded by whatever reindex
+	//     batch is in flight.
+	//  3. The control-socket accept loop exits when the listener is closed
+	//     (deferred below); in-flight handleConn goroutines are deliberately
+	//     not waited on — they die with the process.
+	//
+	// The historical "launchctl bootout left the daemon running for 30+ min"
+	// incident was signal DELIVERY, not signal handling: a direct SIGTERM to
+	// the same process stopped it in ~2s. launchd only signals the process
+	// it spawned (the job); a duplicate daemon auto-started by the STDIO
+	// proxy (or started by hand) is an orphan reparented to launchd pid 1
+	// and is invisible to launchctl, so bootout never sent it SIGTERM.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = d.sseServer.Shutdown(shutdownCtx)
@@ -158,6 +200,43 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.projects = make(map[string]*project.Project)
 	d.mu.Unlock()
 	return nil
+}
+
+// checkSocketOwnership is the single-instance guard. If the socket path
+// exists, probe it with a 'status' message:
+//   - a live daemon answers -> refuse to start (and do not touch the path);
+//   - nothing answers but the pidfile names a live process -> refuse and
+//     tell the user to stop that pid first;
+//   - nothing answers and no live pid is recorded -> the file is stale;
+//     the caller removes it and proceeds.
+//
+// The guard is deliberately socket-based: the pidfile is a sidecar that can
+// be stale or missing (crash, /tmp cleanup, or a previous exit that deleted
+// it after its socket had been stolen) while a daemon is still alive. A
+// residual TOCTOU remains between this check and net.Listen: two truly
+// concurrent starts can both pass; the second one then fails net.Listen
+// with EADDRINUSE instead of silently stealing the socket.
+func (d *Daemon) checkSocketOwnership() error {
+	if _, err := os.Stat(d.socketPath); err != nil {
+		return nil // no socket file: nothing to guard
+	}
+	resp, probeErr := SendMessageTimeout(d.socketPath, Message{Type: "status"}, time.Second)
+	if probeErr == nil && resp.OK {
+		var st struct {
+			PID int `json:"pid"`
+		}
+		_ = json.Unmarshal(resp.Data, &st)
+		if st.PID <= 0 {
+			if pid, alive := IsRunning(d.pidPath); alive {
+				st.PID = pid
+			}
+		}
+		return fmt.Errorf("daemon already running (pid %d, socket %s)", st.PID, d.socketPath)
+	}
+	if pid, alive := IsRunning(d.pidPath); alive {
+		return fmt.Errorf("daemon already running (pid %d, socket %s has no live responder); stop pid %d first", pid, d.socketPath, pid)
+	}
+	return nil // stale socket file: remove and proceed
 }
 
 func (d *Daemon) writePID() error {
@@ -183,6 +262,23 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return true
+}
+
+// removeSocketIfOwned removes path only if the file currently at path still
+// has inode ino — i.e. it is still the socket file this daemon created. If
+// the path holds a different file (for example a socket created by a newer
+// daemon after our path was stolen), it is left untouched. A missing path is
+// not an error.
+func removeSocketIfOwned(path string, ino uint64) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return // already gone
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Ino != ino {
+		return // not our file anymore
+	}
+	_ = os.Remove(path)
 }
 
 func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
@@ -378,13 +474,14 @@ func errResp(err error) Response {
 
 // --- Client helpers ----------------------------------------------------------
 
-// SendMessage opens the control socket, sends a message, and returns the response.
-func SendMessage(socketPath string, msg Message) (Response, error) {
-	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+// SendMessageTimeout is SendMessage with an explicit dial/read deadline.
+func SendMessageTimeout(socketPath string, msg Message, timeout time.Duration) (Response, error) {
+	conn, err := net.DialTimeout("unix", socketPath, timeout)
 	if err != nil {
 		return Response{}, err
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if err := json.NewEncoder(conn).Encode(msg); err != nil {
 		return Response{}, err
 	}
@@ -393,6 +490,11 @@ func SendMessage(socketPath string, msg Message) (Response, error) {
 		return Response{}, err
 	}
 	return resp, nil
+}
+
+// SendMessage opens the control socket, sends a message, and returns the response.
+func SendMessage(socketPath string, msg Message) (Response, error) {
+	return SendMessageTimeout(socketPath, msg, 2*time.Second)
 }
 
 // IsRunning checks whether a daemon is running at socketPath/pidPath.
