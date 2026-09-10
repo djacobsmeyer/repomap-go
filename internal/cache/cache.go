@@ -20,8 +20,11 @@ type Cache struct {
 	mu sync.Mutex
 }
 
-// Open creates (or opens) <projectRoot>/.repomap/tags.db.
-func Open(projectRoot string) (*Cache, error) {
+// Open creates (or opens) <projectRoot>/.repomap/tags.db. `version` is the
+// parser tag-schema fingerprint (parser.CacheVersion): if the stored
+// meta.parser_version differs, every cached tag row is dropped so files are
+// re-parsed with the current parser instead of serving stale tags.
+func Open(projectRoot, version string) (*Cache, error) {
 	dir := filepath.Join(projectRoot, ".repomap")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir cache dir: %w", err)
@@ -40,6 +43,52 @@ func Open(projectRoot string) (*Cache, error) {
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS meta (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create meta schema: %w", err)
+	}
+	// Version the tag rows by parser fingerprint. Inside one transaction so a
+	// crash never leaves the meta row updated while stale rows survive (or
+	// vice versa).
+	tx, err := db.Begin()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("begin version check: %w", err)
+	}
+	var stored string
+	err = tx.QueryRow(`SELECT value FROM meta WHERE key = 'parser_version'`).Scan(&stored)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		tx.Rollback()
+		db.Close()
+		return nil, fmt.Errorf("read parser_version: %w", err)
+	}
+	// A missing parser_version (db written by an older build) is treated
+	// exactly like a mismatch: on ErrNoRows `stored` stays "", which can
+	// never equal the fingerprint, so legacy rows are purged on upgrade.
+	if stored != version {
+		if _, err := tx.Exec(`DELETE FROM tags`); err != nil {
+			tx.Rollback()
+			db.Close()
+			return nil, fmt.Errorf("purge stale tags: %w", err)
+		}
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO meta (key, value) VALUES ('parser_version', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, version); err != nil {
+		tx.Rollback()
+		db.Close()
+		return nil, fmt.Errorf("upsert parser_version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("commit version check: %w", err)
 	}
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
 		// non-fatal

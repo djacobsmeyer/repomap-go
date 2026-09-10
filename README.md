@@ -150,8 +150,14 @@ repomap events                # pretty-print SSE stream to terminal
 | `repo_map` | `project_root`, `map_tokens` (default 8192), `chat_files`, `force_refresh` | Ranked structural map of the project — definitions only, sorted by PageRank |
 | `search_identifiers` | `project_root`, `query`, `filter` (defs/refs/both), `kinds`, `limit` | Find functions/classes/variables by name. For markdown: filter by `kinds: ["heading-1","heading-2","heading-3"]` |
 | `get_blast_radius` | `project_root`, `symbol`, `file` (optional), `depth` (default 3) | Every file and symbol that transitively depends on a given symbol |
-| `find_dead_code` | `project_root`, `min_rank`, `unexported_only`, `exported_only`, `kinds` | Symbols defined but never referenced; use `unexported_only: true` for actionable results |
+| `find_dead_code` | `project_root`, `min_rank`, `unexported_only`, `exported_only`, `kinds`, `include_test_orphans`, `include_doc_orphans` | Symbols defined but never referenced, plus orphan files (each with `lang` and `category`: source/test/docs). Recommended: `unexported_only: true` with `kinds: ["function","method","class"]`; test and docs orphans are hidden by default |
 | `get_changed_symbols` | `project_root`, `git_ref` OR `diff`, `include_blast_radius` | Symbols whose definitions fall within changed line ranges |
+
+### Accuracy notes
+
+- **Python locals are excluded** — a `variable` definition is only tagged at module or class scope; assignments inside functions/lambdas are locals and never appear in results.
+- **Bare-name uses count as references** — a name used as a callback argument, dict/list value, assignment RHS, default parameter, decorator, or attribute/subscript object keeps its definition alive.
+- **Orphan files are categorized** — each `orphan_files` entry has `lang` and `category` (`source`|`test`|`docs`); test and docs files are hidden by default and revealed with `include_test_orphans` / `include_doc_orphans`.
 
 ## Markdown / knowledge base support
 
@@ -169,7 +175,7 @@ Frontmatter keys and code fence info strings are extracted for `search_identifie
 
 ### How the graph works for docs
 
-Each markdown file registers itself as a definition. An `[inline link](target.md)` or `[[Wikilink]]` in file A creates a directed edge A → target, exactly like a function call in code. PageRank over those edges identifies hub documents — files that many others link to. `find_dead_code` surfaces orphan pages (zero inbound links) and `get_blast_radius` answers "which documents link to this one?"
+Each markdown file registers itself as a definition. An `[inline link](target.md)` or `[[Wikilink]]` in file A creates a directed edge A → target, exactly like a function call in code. PageRank over those edges identifies hub documents — files that many others link to. `find_dead_code` surfaces orphan pages (zero inbound links) and `get_blast_radius` answers "which documents link to this one?" Since nothing imports a doc, docs orphans are **hidden from `find_dead_code` by default** — pass `include_doc_orphans: true` to include them (each orphan carries `category: "docs"` so you can filter them back out).
 
 ### Token efficiency for AI agents
 
@@ -193,7 +199,7 @@ For a 500-file vault (~2–3 MB of prose, ~500K tokens), `repo_map(map_tokens=81
 
 **Works best when files link to each other** — Obsidian vaults with `[[wikilinks]]`, documentation sites with `[cross-references](other.md)`, wikis, and any corpus where documents explicitly cite related documents. PageRank identifies hub pages; orphan detection surfaces isolated content.
 
-**Limited graph signal when files don't link** — Some knowledge bases (e.g. AI-prompt vaults loaded via `@-import` conventions, or lecture notes with no cross-refs) have sparse link graphs. In those vaults `find_dead_code` will show most files as "orphans" and `get_blast_radius` will return few dependents — not a bug, but an accurate description of the link structure. `search_identifiers` and heading extraction still work regardless of link density.
+**Limited graph signal when files don't link** — Some knowledge bases (e.g. AI-prompt vaults loaded via `@-import` conventions, or lecture notes with no cross-refs) have sparse link graphs. In those vaults `find_dead_code` would show most files as "orphans" — but docs orphans are now **hidden by default** (pass `include_doc_orphans: true` to see them), so a sparse vault returns a quiet result instead of a wall of noise; `get_blast_radius` will still return few dependents, which is an accurate description of the link structure. `search_identifiers` and heading extraction still work regardless of link density.
 
 ### Ignored by default in markdown projects
 
