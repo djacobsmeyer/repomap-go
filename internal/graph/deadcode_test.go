@@ -84,6 +84,30 @@ func TestFindDeadCodeHidesTestAndDocOrphansByDefault(t *testing.T) {
 	}
 }
 
+func TestFindDeadCodeZeroValueOptionsDefaultsMinRank(t *testing.T) {
+	// GH-5: DeadCodeOptions{} must not mean "PageRank exactly 0" (no file
+	// ever has rank 0, which would silently yield no orphans). The zero
+	// MinRank falls back to DefaultMinRank, so the source orphan on the
+	// existing fixture is still returned.
+	tags, ranks, g := orphanFixtures()
+	res := FindDeadCode(g, tags, ranks, DeadCodeOptions{})
+
+	if len(res.OrphanFiles) != 1 {
+		t.Fatalf("expected exactly 1 orphan with zero-value options, got %d: %+v", len(res.OrphanFiles), res.OrphanFiles)
+	}
+	if res.OrphanFiles[0].File != "src/engine.py" {
+		t.Fatalf("expected src/engine.py to be the only orphan, got %q", res.OrphanFiles[0].File)
+	}
+
+	// Also prove the floor is DefaultMinRank, not 0: a rank between 0 and
+	// 0.001 would be excluded under the old zero-value semantics.
+	ranks["src/engine.py"] = 0.0005
+	res = FindDeadCode(g, tags, ranks, DeadCodeOptions{})
+	if len(res.OrphanFiles) != 1 || res.OrphanFiles[0].File != "src/engine.py" {
+		t.Fatalf("expected src/engine.py (rank 0.0005) under DefaultMinRank floor, got %+v", res.OrphanFiles)
+	}
+}
+
 func TestFindDeadCodeIncludeFlags(t *testing.T) {
 	tags, ranks, g := orphanFixtures()
 	res := FindDeadCode(g, tags, ranks, DeadCodeOptions{

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
@@ -221,7 +222,7 @@ const pyQuery = `
 // semantics, capture filtering, the markdown parse path). Bump it whenever
 // the parser changes in a way the query strings alone do not capture, so
 // tags cached by an older build are invalidated.
-const schemaVersion = 2
+const schemaVersion = 4
 
 // CacheVersion returns a hex sha256 fingerprint of the parser's tag schema:
 // the schemaVersion counter plus every tree-sitter query and the markdown
@@ -237,20 +238,168 @@ func CacheVersion() string {
 // insideFunctionScope reports whether node is nested inside any ancestor
 // whose type is one of scopeTypes (e.g. "function_definition", "lambda").
 // The node itself is not checked, only its ancestors up to the root.
+// A simple slice scan is used instead of a per-call map (GH-5): the
+// scope-type lists are tiny and the ancestor walk is short.
 func insideFunctionScope(node *sitter.Node, scopeTypes ...string) bool {
 	if len(scopeTypes) == 0 {
 		return false
 	}
-	want := make(map[string]bool, len(scopeTypes))
-	for _, t := range scopeTypes {
-		want[t] = true
-	}
 	for p := node.Parent(); p != nil; p = p.Parent() {
-		if want[p.Type()] {
-			return true
+		for _, t := range scopeTypes {
+			if p.Type() == t {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// fnScope describes the names bound inside one Python function: its
+// parameters plus the names declared global/nonlocal in its body. A
+// reference that resolves to a parameter or a recorded local of an
+// enclosing function is a local read, not a use of a same-named
+// module-level definition (GH-5).
+type fnScope struct {
+	params    map[string]bool
+	globals   map[string]bool
+	nonlocals map[string]bool
+}
+
+// fnKey identifies a function node within one file: the node's start byte
+// is unique per node in the file.
+func fnKey(n *sitter.Node) uint32 { return n.StartByte() }
+
+// nearestFunction returns the closest ancestor of node of type
+// "function_definition", or nil if it has none. The node itself is not
+// checked, only its ancestors up to the root.
+func nearestFunction(node *sitter.Node) *sitter.Node {
+	for p := node.Parent(); p != nil; p = p.Parent() {
+		if p.Type() == "function_definition" {
+			return p
+		}
+	}
+	return nil
+}
+
+// buildPyScopes does ONE recursive walk of the tree from root and records,
+// for every function_definition, the names bound in that function's own
+// scope: its parameters, and the names of its global/nonlocal statements.
+// Each function's subtree is walked without descending into nested
+// function_definitions, so a nested function's bindings never leak into the
+// enclosing function's scope (GH-5).
+func buildPyScopes(root *sitter.Node, data []byte) map[uint32]*fnScope {
+	scopes := make(map[uint32]*fnScope)
+	// fill records the scope of one function_definition: parameters from
+	// its direct `parameters` child, globals/nonlocals from statements in
+	// its body (nested functions are not descended into).
+	var fill func(fn *sitter.Node)
+	fill = func(fn *sitter.Node) {
+		s := &fnScope{
+			params:    make(map[string]bool),
+			globals:   make(map[string]bool),
+			nonlocals: make(map[string]bool),
+		}
+		scopes[fnKey(fn)] = s
+		if params := fn.ChildByFieldName("parameters"); params != nil {
+			for i := 0; i < int(params.NamedChildCount()); i++ {
+				c := params.NamedChild(i)
+				if c == nil {
+					continue
+				}
+				switch c.Type() {
+				case "identifier":
+					s.params[c.Content(data)] = true
+				case "typed_parameter":
+					for j := 0; j < int(c.NamedChildCount()); j++ {
+						if cc := c.NamedChild(j); cc != nil && cc.Type() == "identifier" {
+							s.params[cc.Content(data)] = true
+							break
+						}
+					}
+				case "default_parameter", "typed_default_parameter":
+					if name := c.ChildByFieldName("name"); name != nil {
+						s.params[name.Content(data)] = true
+					}
+				case "list_splat_pattern", "dictionary_splat_pattern":
+					for j := 0; j < int(c.NamedChildCount()); j++ {
+						if cc := c.NamedChild(j); cc != nil && cc.Type() == "identifier" {
+							s.params[cc.Content(data)] = true
+							break
+						}
+					}
+				}
+			}
+		}
+		var walkBody func(m *sitter.Node)
+		walkBody = func(m *sitter.Node) {
+			if m == nil || m.Type() == "function_definition" {
+				return
+			}
+			switch m.Type() {
+			case "global_statement":
+				for i := 0; i < int(m.NamedChildCount()); i++ {
+					if c := m.NamedChild(i); c != nil && c.Type() == "identifier" {
+						s.globals[c.Content(data)] = true
+					}
+				}
+			case "nonlocal_statement":
+				for i := 0; i < int(m.NamedChildCount()); i++ {
+					if c := m.NamedChild(i); c != nil && c.Type() == "identifier" {
+						s.nonlocals[c.Content(data)] = true
+					}
+				}
+			}
+			for i := 0; i < int(m.NamedChildCount()); i++ {
+				walkBody(m.NamedChild(i))
+			}
+		}
+		for i := 0; i < int(fn.NamedChildCount()); i++ {
+			walkBody(fn.NamedChild(i))
+		}
+	}
+	var walk func(n *sitter.Node)
+	walk = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_definition" {
+			fill(n)
+		}
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			walk(n.NamedChild(i))
+		}
+	}
+	walk(root)
+	return scopes
+}
+
+// pyRefResolvesToFunctionLocal reports whether a Python reference (name at
+// node) resolves to a binding of an enclosing function: one of its
+// parameters, or a local variable recorded when its def was dropped as
+// function-local. It walks the function-ancestor chain from the innermost
+// function outward: a `global` or `nonlocal` declaration for the name stops
+// the walk (the reference reaches outer scope and is kept), a
+// parameter/local binding drops it, and reaching the top level keeps it
+// (GH-5).
+func pyRefResolvesToFunctionLocal(node *sitter.Node, name string, scopes map[uint32]*fnScope, localDefs map[uint32]map[string]bool) bool {
+	fn := nearestFunction(node)
+	for {
+		if fn == nil {
+			return false
+		}
+		s := scopes[fnKey(fn)]
+		if s.globals[name] {
+			return false
+		}
+		if s.nonlocals[name] {
+			fn = nearestFunction(fn)
+			continue
+		}
+		if s.params[name] || localDefs[fnKey(fn)][name] {
+			return true
+		}
+		fn = nearestFunction(fn)
+	}
 }
 
 // declarationNodeTypes lists the tree-sitter node types that delimit a
@@ -328,6 +477,32 @@ func languageAndQuery(lang string) (*sitter.Language, string, bool) {
 	return nil, "", false
 }
 
+// compiledQueries caches compiled tree-sitter queries per language. A
+// *sitter.Query is immutable after compilation, so one compiled query can be
+// shared across cursors and goroutines (GH-5). Cached queries are never
+// closed.
+var (
+	compiledQueries   = map[string]*sitter.Query{}
+	compiledQueriesMu sync.Mutex
+)
+
+// compiledQueryFor returns the compiled query for lang, compiling it on first
+// use and reusing the cached instance thereafter. ok is false on a query
+// compile error (soft failure, same as before).
+func compiledQueryFor(lang string, tsLang *sitter.Language, queryStr string) (q *sitter.Query, ok bool) {
+	compiledQueriesMu.Lock()
+	defer compiledQueriesMu.Unlock()
+	if cached, hit := compiledQueries[lang]; hit {
+		return cached, true
+	}
+	q, err := sitter.NewQuery([]byte(queryStr), tsLang)
+	if err != nil {
+		return nil, false
+	}
+	compiledQueries[lang] = q
+	return q, true
+}
+
 // ParseFile parses a single file rooted at `root` (relpath is relative to root)
 // and returns the extracted tags. On any soft error (parse failure, query
 // failure) it returns an empty slice without surfacing the error.
@@ -374,18 +549,28 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 		return nil, nil
 	}
 
-	q, err := sitter.NewQuery([]byte(queryStr), tsLang)
-	if err != nil {
+	q, ok := compiledQueryFor(lang, tsLang, queryStr)
+	if !ok {
 		// query compile error — soft fail
 		return nil, nil
 	}
-	defer q.Close()
+	// q is a cached, shared query — never Close it here (GH-5).
 
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()
 	qc.Exec(q, root_node)
 
 	var tags []Tag
+	// Python (GH-5): references are held back and resolved against function
+	// scope after the loop, so a ref that binds to an enclosing function's
+	// parameter or local never masks a same-named module-level definition.
+	var pendingRefs []struct {
+		tag  Tag
+		node *sitter.Node
+	}
+	// localDefs records, per enclosing function, the names dropped as
+	// function-local variable defs (see the capture loop below).
+	localDefs := make(map[uint32]map[string]bool)
 	for {
 		m, ok := qc.NextMatch()
 		if !ok {
@@ -406,12 +591,24 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			if node == nil {
 				continue
 			}
+			name := node.Content(data)
+			if name == "" {
+				continue
+			}
 			// Python (Class A fix): a variable definition only counts at module
 			// or class-body scope. Assignments inside a function or lambda are
 			// locals, not module-level symbols, so drop them to avoid
-			// false positives in dead-code analysis.
+			// false positives in dead-code analysis. When one is dropped, its
+			// name is recorded under the nearest enclosing function so the
+			// reference resolution below can drop reads of it (GH-5).
 			if lang == "python" && kind == "variable" &&
 				insideFunctionScope(node, "function_definition", "lambda") {
+				if fn := nearestFunction(node); fn != nil {
+					if localDefs[fnKey(fn)] == nil {
+						localDefs[fnKey(fn)] = make(map[string]bool)
+					}
+					localDefs[fnKey(fn)][name] = true
+				}
 				continue
 			}
 			// TypeScript/JavaScript (Class A fix, GH-2): a variable_declarator
@@ -429,10 +626,6 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 				insideFunctionScope(node, "function_declaration", "method_declaration", "func_literal") {
 				continue
 			}
-			name := node.Content(data)
-			if name == "" {
-				continue
-			}
 			// Python: `self` / `cls` can never resolve to a module-level
 			// definition; drop their ref captures (they only add edge
 			// volume).
@@ -444,17 +637,58 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			if kind != "ref" {
 				endLine = definitionEndLine(node, lang, line)
 			}
-			tags = append(tags, Tag{
+			tag := Tag{
 				RelFile: relpath,
 				Line:    line,
 				EndLine: endLine,
 				Name:    name,
 				Kind:    kind,
 				Lang:    lang,
-			})
+			}
+			// Python (GH-5): refs are resolved against function scope after
+			// the loop; def tags append as today.
+			if lang == "python" && kind == "ref" {
+				pendingRefs = append(pendingRefs, struct {
+					tag  Tag
+					node *sitter.Node
+				}{tag, node})
+				continue
+			}
+			tags = append(tags, tag)
 		}
 	}
-	return tags, nil
+	// Python (GH-5): resolve the pending references against function scope
+	// and append the ones that reach module/class scope.
+	if lang == "python" {
+		scopes := buildPyScopes(root_node, data)
+		for _, pr := range pendingRefs {
+			if !pyRefResolvesToFunctionLocal(pr.node, pr.tag.Name, scopes, localDefs) {
+				tags = append(tags, pr.tag)
+			}
+		}
+	}
+	return dedupeExactTags(tags), nil
+}
+
+// dedupeExactTags drops tags that are exact duplicates — same (Name, Kind,
+// Line) — keeping the first occurrence. Overlapping tree-sitter captures can
+// emit the same occurrence twice (e.g. an attribute that is both called and
+// read on one line); the duplicates carry no information but inflate the tag
+// index and cached payloads (GH-5). Different lines are never merged:
+// SearchIdentifiers lists caller lines, so a name referenced on two lines
+// must keep both.
+func dedupeExactTags(tags []Tag) []Tag {
+	seen := make(map[string]struct{}, len(tags))
+	out := tags[:0]
+	for _, t := range tags {
+		key := t.Name + "\x00" + t.Kind + "\x00" + strconv.Itoa(t.Line)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }
 
 // wikilinkRe matches Obsidian-style wikilinks: [[Target]] or [[Target|Alias]].

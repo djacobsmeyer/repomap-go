@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"testing"
 )
 
@@ -477,6 +478,62 @@ func TestPythonValuePositionRefs(t *testing.T) {
 	}
 }
 
+// hasRefTag reports whether some reference tag has the given name.
+func hasRefTag(tags []Tag, name string) bool {
+	return hasTag(tags, name, "ref")
+}
+
+// TestPythonRefResolvingToFunctionLocalDropped: a ref whose name resolves
+// to a local binding of an enclosing function is not a reference, so a
+// local _x no longer hides a same-named module-level definition (GH-5).
+func TestPythonRefResolvingToFunctionLocalDropped(t *testing.T) {
+	t.Run("localAssignmentShadowsModuleLevel", func(t *testing.T) {
+		tags := parsePy(t, "_x = 1\n\ndef f():\n    _x = 2\n    return _x\n")
+		if !hasDefTag(tags, "_x") {
+			t.Errorf("module-level _x must stay a def; got %+v", tags)
+		}
+		if hasRefTag(tags, "_x") {
+			t.Errorf("ref resolving to function-local _x must be dropped; got %+v", tags)
+		}
+	})
+	t.Run("moduleLevelReadKept", func(t *testing.T) {
+		tags := parsePy(t, "_y = 1\n\ndef g():\n    return _y\n")
+		if !hasRefTag(tags, "_y") {
+			t.Errorf("read of module-level _y must stay a ref; got %+v", tags)
+		}
+	})
+	t.Run("parameterReadDropped", func(t *testing.T) {
+		tags := parsePy(t, "def h(_p):\n    return _p\n")
+		if hasRefTag(tags, "_p") {
+			t.Errorf("read of parameter _p must be dropped; got %+v", tags)
+		}
+	})
+	t.Run("globalDeclarationKeepsRef", func(t *testing.T) {
+		tags := parsePy(t, "_x = 1\n\ndef k():\n    global _x\n    _x = 3\n    return _x\n")
+		if !hasRefTag(tags, "_x") {
+			t.Errorf("_x declared global must stay a ref; got %+v", tags)
+		}
+	})
+	t.Run("nestedFunctionReadOfOuterLocalDropped", func(t *testing.T) {
+		tags := parsePy(t, "def outer():\n    _z = 1\n    def inner():\n        return _z\n    return inner\n")
+		if hasRefTag(tags, "_z") {
+			t.Errorf("inner read of outer's local _z must be dropped; got %+v", tags)
+		}
+	})
+	t.Run("nestedGlobalDeclarationKeepsRef", func(t *testing.T) {
+		tags := parsePy(t, "_x = 1\n\ndef f():\n    _x = 2\n    def h():\n        global _x\n        return _x\n    return h\n")
+		if !hasRefTag(tags, "_x") {
+			t.Errorf("_x declared global in the nested function must stay a ref; got %+v", tags)
+		}
+	})
+	t.Run("attributeReadUnaffected", func(t *testing.T) {
+		tags := parsePy(t, "def m(self):\n    return self._cache\n")
+		if !hasRefTag(tags, "_cache") {
+			t.Errorf("attribute read of _cache must stay a ref; got %+v", tags)
+		}
+	})
+}
+
 // TestTSFunctionLocalVariableDefsDropped: variable_declarators inside
 // function bodies (declaration, expression, arrow, method, generator) are
 // locals and must NOT produce definition tags (Class A, GH-2).
@@ -863,5 +920,125 @@ func TestRefsKeepEndLineZero(t *testing.T) {
 	}
 	if !hasTag(tags, "g", "ref") {
 		t.Fatalf("expected ref g; got %+v", tags)
+	}
+}
+
+// pyBenchmarkSource is a representative Python module used by
+// BenchmarkParseFilePython: defs, methods, calls, comprehensions, f-strings.
+const pyBenchmarkSource = `
+import os
+from collections import defaultdict
+
+_CACHE = {}
+
+def build_index(root):
+    index = defaultdict(list)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if name.endswith(".py"):
+                index[name].append(os.path.join(dirpath, name))
+    return dict(index)
+
+class Registry:
+    def __init__(self, name):
+        self.name = name
+        self._entries = []
+
+    def register(self, key, value):
+        self._entries.append((key, value))
+        return len(self._entries)
+
+    def lookup(self, key):
+        for k, v in self._entries:
+            if k == key:
+                return v
+        return None
+
+def summarize(index):
+    return {name: len(paths) for name, paths in index.items() if paths}
+`
+
+// TestParseFileQueryCacheTransparent: two ParseFile calls for the same
+// language yield identical tags, proving the per-language compiled-query
+// cache (GH-5) does not change extraction results.
+func TestParseFileQueryCacheTransparent(t *testing.T) {
+	src := "def f(a, b):\n" +
+		"    total = a + b\n" +
+		"    return [x * total for x in (a, b)]\n" +
+		"MOD = f(1, 2)\n"
+	first := parsePy(t, src)
+	second := parsePy(t, src)
+	if len(first) != len(second) {
+		t.Fatalf("tag count differs across calls: %d != %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("tag %d differs across calls: %+v != %+v", i, first[i], second[i])
+		}
+	}
+}
+
+// BenchmarkParseFilePython measures end-to-end ParseFile cost for a Python
+// file, including the (now cached) query compile path (GH-5).
+func BenchmarkParseFilePython(b *testing.B) {
+	dir, err := os.MkdirTemp("", "repomap-bench")
+	if err != nil {
+		b.Fatalf("mkdir temp: %v", err)
+	}
+	b.Cleanup(func() { os.RemoveAll(dir) })
+	rel := "bench.py"
+	if err := os.WriteFile(filepath.Join(dir, rel), []byte(pyBenchmarkSource), 0o644); err != nil {
+		b.Fatalf("write fixture: %v", err)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := ParseFile(dir, rel); err != nil {
+			b.Fatalf("ParseFile: %v", err)
+		}
+	}
+}
+
+// TestPythonNoExactDuplicateTags: overlapping captures on one line (an
+// attribute that is both called and read) must yield exactly one ref tag per
+// (Name, Kind, Line) (GH-5).
+func TestPythonNoExactDuplicateTags(t *testing.T) {
+	src := "obj.method()\n"
+	tags := parsePy(t, src)
+
+	var methodRefs int
+	for _, tag := range tags {
+		if tag.Kind == "ref" && tag.Name == "method" {
+			methodRefs++
+			if tag.Line != 1 {
+				t.Errorf("ref method Line = %d, want 1; got %+v", tag.Line, tags)
+			}
+		}
+	}
+	if methodRefs != 1 {
+		t.Fatalf("expected exactly 1 ref tag named method, got %d; tags: %+v", methodRefs, tags)
+	}
+
+	// Invariant across the whole file: no exact (Name, Kind, Line) repeats.
+	seen := map[string]int{}
+	for _, tag := range tags {
+		key := tag.Name + "\x00" + tag.Kind + "\x00" + strconv.Itoa(tag.Line)
+		seen[key]++
+	}
+	for key, n := range seen {
+		if n > 1 {
+			t.Errorf("exact duplicate tag %q appears %d times; tags: %+v", key, n, tags)
+		}
+	}
+}
+
+// TestPythonSameNameDifferentLinesKept: dedupe must not merge the same name
+// referenced on different lines (SearchIdentifiers lists caller lines).
+func TestPythonSameNameDifferentLinesKept(t *testing.T) {
+	src := "a = helper()\n" +
+		"b = helper()\n"
+	tags := parsePy(t, src)
+	if n := countTags(tags, "helper", "ref"); n != 2 {
+		t.Fatalf("expected 2 ref tags for helper (one per line), got %d; tags: %+v", n, tags)
 	}
 }

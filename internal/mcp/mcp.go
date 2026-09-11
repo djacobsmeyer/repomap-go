@@ -302,7 +302,7 @@ type findDeadCodeArgs struct {
 }
 
 func (s *Server) toolFindDeadCode(raw json.RawMessage) (any, *RPCError) {
-	args := findDeadCodeArgs{MinRank: 0.001}
+	args := findDeadCodeArgs{MinRank: graph.DefaultMinRank}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
@@ -315,7 +315,7 @@ func (s *Server) toolFindDeadCode(raw json.RawMessage) (any, *RPCError) {
 		return nil, &RPCError{Code: codeInvalidParams, Message: "unexported_only and exported_only are mutually exclusive"}
 	}
 	if args.MinRank <= 0 {
-		args.MinRank = 0.001
+		args.MinRank = graph.DefaultMinRank
 	}
 	opts := graph.DeadCodeOptions{
 		MinRank:            args.MinRank,
