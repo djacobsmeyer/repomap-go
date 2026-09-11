@@ -18,13 +18,18 @@ type ChangedSymbolsResult struct {
 	Summary        string          `json:"summary"`
 }
 
-// ChangedSymbol describes a def-tag whose definition line falls within a
-// changed line range in a unified diff.
+// ChangedSymbol describes a def-tag whose span intersects a changed line
+// range in a unified diff.
 type ChangedSymbol struct {
-	File        string             `json:"file"`
-	Symbol      string             `json:"symbol"`
-	Line        int                `json:"line"`
-	Kind        string             `json:"kind"`
+	File   string `json:"file"`
+	Symbol string `json:"symbol"`
+	Line   int    `json:"line"`
+	Kind   string `json:"kind"`
+	// Reason is "definition" when a changed range covers the symbol's own
+	// definition line, or "body" when the change falls inside the symbol's
+	// span [Line, EndLine] without touching its definition line — a body
+	// edit attributed to the enclosing definition (GH-4).
+	Reason      string             `json:"reason"`
 	BlastRadius *BlastRadiusResult `json:"blast_radius,omitempty"`
 }
 
@@ -105,8 +110,15 @@ func GitDiff(projectRoot, gitRef string) (string, error) {
 	return string(out), nil
 }
 
-// ChangedSymbols returns def-tags whose line numbers fall within any changed
-// LineRange. If includeBlastRadius is true, BlastRadius is attached to each.
+// ChangedSymbols returns def-tags whose span [Line, EndLine] intersects any
+// changed LineRange (EndLine 0 — tags from older caches — is treated as
+// Line, so pre-span caches keep working). A change on a definition's own
+// line yields Reason "definition"; a change inside its body (span only) is
+// attributed to the definition with Reason "body". When nested definitions
+// (one span containing another) both match the same change, only the
+// innermost is kept unless the outer's own definition line is in a range.
+// Results are ordered by line. If includeBlastRadius is true, BlastRadius is
+// attached to each.
 func ChangedSymbols(tagsByFile map[string][]parser.Tag, diff map[string][]LineRange, g *FileGraph, includeBlastRadius bool, maxDepth int) ChangedSymbolsResult {
 	res := ChangedSymbolsResult{ChangedSymbols: []ChangedSymbol{}}
 	if maxDepth <= 0 {
@@ -128,15 +140,30 @@ func ChangedSymbols(tagsByFile map[string][]parser.Tag, diff map[string][]LineRa
 		// Stable order.
 		ordered := make([]parser.Tag, len(tags))
 		copy(ordered, tags)
-		sort.Slice(ordered, func(i, j int) bool { return ordered[i].Line < ordered[j].Line })
+		sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Line < ordered[j].Line })
+		var matched []parser.Tag
 		for _, t := range ordered {
 			if !t.IsDef() {
 				continue
 			}
-			if !inAnyRange(t.Line, ranges) {
+			if !spanIntersects(t, ranges) {
 				continue
 			}
-			cs := ChangedSymbol{File: f, Symbol: t.Name, Line: t.Line, Kind: t.Kind}
+			matched = append(matched, t)
+		}
+		for _, t := range matched {
+			defLineChanged := inAnyRange(t.Line, ranges)
+			// Nested definitions: a body edit inside an inner definition
+			// (e.g. a method in a class) reports only the innermost one,
+			// unless the outer's own definition line is in a range.
+			if !defLineChanged && shadowedByInner(t, ranges, matched) {
+				continue
+			}
+			reason := "body"
+			if defLineChanged {
+				reason = "definition"
+			}
+			cs := ChangedSymbol{File: f, Symbol: t.Name, Line: t.Line, Kind: t.Kind, Reason: reason}
 			if includeBlastRadius {
 				br := BlastRadius(g, tagsByFile, t.Name, f, maxDepth)
 				cs.BlastRadius = &br
@@ -144,8 +171,67 @@ func ChangedSymbols(tagsByFile map[string][]parser.Tag, diff map[string][]LineRa
 			res.ChangedSymbols = append(res.ChangedSymbols, cs)
 		}
 	}
-	res.Summary = fmt.Sprintf("%d changed symbols across %d files", len(res.ChangedSymbols), len(files))
+	summary := fmt.Sprintf("%d changed symbols across %d files", len(res.ChangedSymbols), len(files))
+	bodyCount := 0
+	for _, cs := range res.ChangedSymbols {
+		if cs.Reason == "body" {
+			bodyCount++
+		}
+	}
+	if bodyCount > 0 {
+		summary += fmt.Sprintf(" (%d attributed to enclosing definitions)", bodyCount)
+	}
+	res.Summary = summary
 	return res
+}
+
+// spanEnd returns the tag's span end line, treating EndLine 0 (tags cached
+// before spans existed) as the tag's own line.
+func spanEnd(t parser.Tag) int {
+	if t.EndLine >= t.Line {
+		return t.EndLine
+	}
+	return t.Line
+}
+
+// spanIntersects reports whether the tag's span [Line, spanEnd] intersects
+// any changed range.
+func spanIntersects(t parser.Tag, ranges []LineRange) bool {
+	end := spanEnd(t)
+	for _, r := range ranges {
+		if r.Start <= end && r.End >= t.Line {
+			return true
+		}
+	}
+	return false
+}
+
+// shadowedByInner reports whether every changed range that matches t is also
+// intersected by some strictly inner matched definition — i.e. t is the
+// outer of nested definitions (one span containing another) and the inner
+// one already attributes every change, so t (whose own definition line is
+// untouched) is dropped: a body edit inside a method reports the method,
+// not also the class.
+func shadowedByInner(t parser.Tag, ranges []LineRange, matched []parser.Tag) bool {
+	end := spanEnd(t)
+	for _, r := range ranges {
+		if r.Start > end || r.End < t.Line {
+			continue // r does not match t
+		}
+		covered := false
+		for _, other := range matched {
+			if other.Line >= t.Line && spanEnd(other) <= end &&
+				(other.Line > t.Line || spanEnd(other) < end) &&
+				r.Start <= spanEnd(other) && r.End >= other.Line {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
 }
 
 func inAnyRange(line int, ranges []LineRange) bool {
