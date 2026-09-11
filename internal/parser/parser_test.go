@@ -72,6 +72,21 @@ func hasDefTag(tags []Tag, name string) bool {
 	return false
 }
 
+// countTags counts tags with the given name and kind ("ref" or "def" for
+// any definition kind).
+func countTags(tags []Tag, name, kind string) int {
+	n := 0
+	for _, t := range tags {
+		if t.Name != name {
+			continue
+		}
+		if (kind == "def" && t.IsDef()) || (kind == "ref" && t.Kind == "ref") {
+			n++
+		}
+	}
+	return n
+}
+
 // TestPythonModuleLevelVariableDef: a module-level assignment is a
 // "variable" definition (kept).
 func TestPythonModuleLevelVariableDef(t *testing.T) {
@@ -587,5 +602,159 @@ func TestGoFuncLiteralLocalDropped(t *testing.T) {
 	}
 	if !hasTag(tags, "outer", "function") {
 		t.Errorf("expected function def outer; got %+v", tags)
+	}
+}
+
+// TestGoValuePositionRefs: identifiers in Go value positions (call
+// arguments, composite-literal values, assignment/short-var RHS, return
+// values, selector operands and non-call selector reads) are references
+// (Class B, GH-2).
+func TestGoValuePositionRefs(t *testing.T) {
+	src := "package p\n" +
+		"\n" +
+		"func use() {\n" +
+		"\thandler(_cb, _val)\n" + // call arguments
+		"\tv := T{F: _a, G: 2}\n" + // composite literal values (keyed + positional)
+		"\tw := _b\n" + // assignment RHS
+		"\tz := _c\n" + // short var declaration RHS
+		"\tvar u = _d\n" + // var spec RHS
+		"\treturn v + w + z + u\n" + // return values
+		"\t_ = pkg.X\n" + // selector operand (non-call read)
+		"\t_ = obj.Y\n" + // selector operand, second
+		"\t_ = v\n" +
+		"}\n"
+	tags := parseGo(t, src)
+	for _, name := range []string{"_cb", "_val", "_a", "_b", "_c", "_d", "pkg", "X", "obj", "Y"} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected ref %q; got %+v", name, tags)
+		}
+	}
+	// The callee is still a call reference.
+	if !hasTag(tags, "handler", "ref") {
+		t.Errorf("expected ref handler (callee); got %+v", tags)
+	}
+}
+
+// TestGoTypeRefs: type identifiers in non-definition positions (parameter,
+// result, field, var/const, pointer/slice/map/channel elements, composite
+// literal type, type assertion, generic type args) are references (Class B,
+// GH-2).
+func TestGoTypeRefs(t *testing.T) {
+	src := "package p\n" +
+		"\n" +
+		"func t(a _T1, b *_T2) []map[string]chan _T3 {\n" + // param + result types
+		"\tvar pv *_T4\n" + // pointer element
+		"\tvar sv []_T5\n" + // slice element
+		"\tvar mv map[string]_T6\n" + // map key+value
+		"\tvar cv chan _T7\n" + // channel value
+		"\tvar fv func(int) _T8\n" + // function type
+		"\tcl := _T9{}\n" + // composite literal type
+		"\tasserted := anyVal.(_T10)\n" + // type assertion
+		"\tgen[_T11]()\n" + // generic type argument
+		"\t_ = pv\n" +
+		"\t_ = sv\n" +
+		"\t_ = mv\n" +
+		"\t_ = cv\n" +
+		"\t_ = fv\n" +
+		"\t_ = cl\n" +
+		"\t_ = asserted\n" +
+		"\treturn nil\n" +
+		"}\n" +
+		"\n" +
+		"type S struct{ F _T12 }\n"
+	tags := parseGo(t, src)
+	for _, name := range []string{
+		"_T1", "_T2", "_T3", "_T4", "_T5", "_T6", "_T7", "_T8",
+		"_T9", "_T10", "_T11", "_T12",
+	} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected type ref %q; got %+v", name, tags)
+		}
+	}
+	// The struct and its field type def are still definitions.
+	if !hasTag(tags, "S", "type") {
+		t.Errorf("expected type def S; got %+v", tags)
+	}
+}
+
+// TestGoUnusedTypeStillReported: a Go type defined and never used in one
+// file must NOT self-reference: exactly one def tag and zero ref tags with
+// its name (Class B regression, GH-2).
+func TestGoUnusedTypeStillReported(t *testing.T) {
+	src := "package p\n" +
+		"\n" +
+		"type _Unused struct{}\n"
+	tags := parseGo(t, src)
+	if n := countTags(tags, "_Unused", "def"); n != 1 {
+		t.Errorf("def tags for _Unused = %d, want exactly 1; got %+v", n, tags)
+	}
+	if n := countTags(tags, "_Unused", "ref"); n != 0 {
+		t.Errorf("ref tags for _Unused = %d, want 0 (no self-reference); got %+v", n, tags)
+	}
+}
+
+// TestTSValuePositionRefs: identifiers in TS value positions (call
+// arguments, object-literal pair values, declarator values, assignment
+// RHS, array elements, return values, member objects and non-call property
+// reads, subscript objects, new constructors) are references (Class B,
+// GH-2).
+func TestTSValuePositionRefs(t *testing.T) {
+	src := "f(_a);\n" + // call argument
+		"const o = { k: _b };\n" + // object literal pair value
+		"let v = _c;\n" + // variable declarator value
+		"v = _d;\n" + // assignment RHS
+		"const arr = [_e];\n" + // array element
+		"function g(): number { return _f; }\n" + // return value
+		"obj.prop;\n" + // member object + non-call property read
+		"arr[_g];\n" + // subscript object + index
+		"new Ctor(_h);\n" // new constructor + argument
+	tags := parseTS(t, src)
+	for _, name := range []string{"_a", "_b", "_c", "_d", "_e", "_f", "obj", "prop", "_g", "Ctor", "_h"} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected ref %q; got %+v", name, tags)
+		}
+	}
+	// The callee is still a call reference.
+	if !hasTag(tags, "f", "ref") {
+		t.Errorf("expected ref f (callee); got %+v", tags)
+	}
+}
+
+// TestTSTypeRefs: type identifiers in type annotations and generic
+// arguments are references; a declaration's own name is never a ref
+// (Class B, GH-2).
+func TestTSTypeRefs(t *testing.T) {
+	src := "function f(x: _T1): _T2 { return x; }\n" + // param + return annotations
+		"const a: _T3 = b;\n" + // variable annotation
+		"const g = foo<_T4>(_T5);\n" + // generic type argument + call arg
+		"const h: Array<_T6> = [];\n" + // generic type in annotation
+		"type Alias = _T7;\n" + // type alias value
+		"const i: _T8 | null = null;\n" // union type
+	tags := parseTS(t, src)
+	for _, name := range []string{"_T1", "_T2", "_T3", "_T4", "_T5", "_T6", "_T7", "_T8"} {
+		if !hasTag(tags, name, "ref") {
+			t.Errorf("expected type ref %q; got %+v", name, tags)
+		}
+	}
+	// The alias's own name is a definition, not a self-reference.
+	if n := countTags(tags, "Alias", "ref"); n != 0 {
+		t.Errorf("ref tags for Alias = %d, want 0 (no self-reference); got %+v", n, tags)
+	}
+	if !hasTag(tags, "Alias", "type") {
+		t.Errorf("expected type def Alias; got %+v", tags)
+	}
+}
+
+// TestTSUnusedTypeStillReported: a TS type defined and never used in one
+// file must NOT self-reference: exactly one def tag and zero ref tags with
+// its name (Class B regression, GH-2).
+func TestTSUnusedTypeStillReported(t *testing.T) {
+	src := "interface _Unused {}\n"
+	tags := parseTS(t, src)
+	if n := countTags(tags, "_Unused", "def"); n != 1 {
+		t.Errorf("def tags for _Unused = %d, want exactly 1; got %+v", n, tags)
+	}
+	if n := countTags(tags, "_Unused", "ref"); n != 0 {
+		t.Errorf("ref tags for _Unused = %d, want 0 (no self-reference); got %+v", n, tags)
 	}
 }
