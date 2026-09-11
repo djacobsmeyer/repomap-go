@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"testing"
 )
 
@@ -939,5 +940,49 @@ func BenchmarkParseFilePython(b *testing.B) {
 		if _, err := ParseFile(dir, rel); err != nil {
 			b.Fatalf("ParseFile: %v", err)
 		}
+	}
+}
+
+// TestPythonNoExactDuplicateTags: overlapping captures on one line (an
+// attribute that is both called and read) must yield exactly one ref tag per
+// (Name, Kind, Line) (GH-5).
+func TestPythonNoExactDuplicateTags(t *testing.T) {
+	src := "obj.method()\n"
+	tags := parsePy(t, src)
+
+	var methodRefs int
+	for _, tag := range tags {
+		if tag.Kind == "ref" && tag.Name == "method" {
+			methodRefs++
+			if tag.Line != 1 {
+				t.Errorf("ref method Line = %d, want 1; got %+v", tag.Line, tags)
+			}
+		}
+	}
+	if methodRefs != 1 {
+		t.Fatalf("expected exactly 1 ref tag named method, got %d; tags: %+v", methodRefs, tags)
+	}
+
+	// Invariant across the whole file: no exact (Name, Kind, Line) repeats.
+	seen := map[string]int{}
+	for _, tag := range tags {
+		key := tag.Name + "\x00" + tag.Kind + "\x00" + strconv.Itoa(tag.Line)
+		seen[key]++
+	}
+	for key, n := range seen {
+		if n > 1 {
+			t.Errorf("exact duplicate tag %q appears %d times; tags: %+v", key, n, tags)
+		}
+	}
+}
+
+// TestPythonSameNameDifferentLinesKept: dedupe must not merge the same name
+// referenced on different lines (SearchIdentifiers lists caller lines).
+func TestPythonSameNameDifferentLinesKept(t *testing.T) {
+	src := "a = helper()\n" +
+		"b = helper()\n"
+	tags := parsePy(t, src)
+	if n := countTags(tags, "helper", "ref"); n != 2 {
+		t.Fatalf("expected 2 ref tags for helper (one per line), got %d; tags: %+v", n, tags)
 	}
 }

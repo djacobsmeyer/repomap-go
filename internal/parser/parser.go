@@ -222,7 +222,7 @@ const pyQuery = `
 // semantics, capture filtering, the markdown parse path). Bump it whenever
 // the parser changes in a way the query strings alone do not capture, so
 // tags cached by an older build are invalidated.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // CacheVersion returns a hex sha256 fingerprint of the parser's tag schema:
 // the schemaVersion counter plus every tree-sitter query and the markdown
@@ -481,7 +481,28 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			})
 		}
 	}
-	return tags, nil
+	return dedupeExactTags(tags), nil
+}
+
+// dedupeExactTags drops tags that are exact duplicates — same (Name, Kind,
+// Line) — keeping the first occurrence. Overlapping tree-sitter captures can
+// emit the same occurrence twice (e.g. an attribute that is both called and
+// read on one line); the duplicates carry no information but inflate the tag
+// index and cached payloads (GH-5). Different lines are never merged:
+// SearchIdentifiers lists caller lines, so a name referenced on two lines
+// must keep both.
+func dedupeExactTags(tags []Tag) []Tag {
+	seen := make(map[string]struct{}, len(tags))
+	out := tags[:0]
+	for _, t := range tags {
+		key := t.Name + "\x00" + t.Kind + "\x00" + strconv.Itoa(t.Line)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }
 
 // wikilinkRe matches Obsidian-style wikilinks: [[Target]] or [[Target|Alias]].
