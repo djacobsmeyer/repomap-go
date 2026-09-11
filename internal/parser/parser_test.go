@@ -478,6 +478,62 @@ func TestPythonValuePositionRefs(t *testing.T) {
 	}
 }
 
+// hasRefTag reports whether some reference tag has the given name.
+func hasRefTag(tags []Tag, name string) bool {
+	return hasTag(tags, name, "ref")
+}
+
+// TestPythonRefResolvingToFunctionLocalDropped: a ref whose name resolves
+// to a local binding of an enclosing function is not a reference, so a
+// local _x no longer hides a same-named module-level definition (GH-5).
+func TestPythonRefResolvingToFunctionLocalDropped(t *testing.T) {
+	t.Run("localAssignmentShadowsModuleLevel", func(t *testing.T) {
+		tags := parsePy(t, "_x = 1\n\ndef f():\n    _x = 2\n    return _x\n")
+		if !hasDefTag(tags, "_x") {
+			t.Errorf("module-level _x must stay a def; got %+v", tags)
+		}
+		if hasRefTag(tags, "_x") {
+			t.Errorf("ref resolving to function-local _x must be dropped; got %+v", tags)
+		}
+	})
+	t.Run("moduleLevelReadKept", func(t *testing.T) {
+		tags := parsePy(t, "_y = 1\n\ndef g():\n    return _y\n")
+		if !hasRefTag(tags, "_y") {
+			t.Errorf("read of module-level _y must stay a ref; got %+v", tags)
+		}
+	})
+	t.Run("parameterReadDropped", func(t *testing.T) {
+		tags := parsePy(t, "def h(_p):\n    return _p\n")
+		if hasRefTag(tags, "_p") {
+			t.Errorf("read of parameter _p must be dropped; got %+v", tags)
+		}
+	})
+	t.Run("globalDeclarationKeepsRef", func(t *testing.T) {
+		tags := parsePy(t, "_x = 1\n\ndef k():\n    global _x\n    _x = 3\n    return _x\n")
+		if !hasRefTag(tags, "_x") {
+			t.Errorf("_x declared global must stay a ref; got %+v", tags)
+		}
+	})
+	t.Run("nestedFunctionReadOfOuterLocalDropped", func(t *testing.T) {
+		tags := parsePy(t, "def outer():\n    _z = 1\n    def inner():\n        return _z\n    return inner\n")
+		if hasRefTag(tags, "_z") {
+			t.Errorf("inner read of outer's local _z must be dropped; got %+v", tags)
+		}
+	})
+	t.Run("nestedGlobalDeclarationKeepsRef", func(t *testing.T) {
+		tags := parsePy(t, "_x = 1\n\ndef f():\n    _x = 2\n    def h():\n        global _x\n        return _x\n    return h\n")
+		if !hasRefTag(tags, "_x") {
+			t.Errorf("_x declared global in the nested function must stay a ref; got %+v", tags)
+		}
+	})
+	t.Run("attributeReadUnaffected", func(t *testing.T) {
+		tags := parsePy(t, "def m(self):\n    return self._cache\n")
+		if !hasRefTag(tags, "_cache") {
+			t.Errorf("attribute read of _cache must stay a ref; got %+v", tags)
+		}
+	})
+}
+
 // TestTSFunctionLocalVariableDefsDropped: variable_declarators inside
 // function bodies (declaration, expression, arrow, method, generator) are
 // locals and must NOT produce definition tags (Class A, GH-2).
