@@ -50,3 +50,29 @@ func TestFindDeadCodeSchemaGH1(t *testing.T) {
 		t.Errorf("find_dead_code description does not mention %q; got: %s", "kinds", desc)
 	}
 }
+
+// TestGetChangedSymbolsSchemaGH4 verifies the MCP tool schema for
+// get_changed_symbols after the GH-4 fix: the description must advertise
+// span-based (enclosing-definition) attribution and the reason field.
+func TestGetChangedSymbolsSchemaGH4(t *testing.T) {
+	s := New("/nonexistent-root", nil)
+
+	var tool map[string]any
+	for _, t := range s.toolsList() {
+		if t["name"] == "get_changed_symbols" {
+			tool = t
+			break
+		}
+	}
+	if tool == nil {
+		t.Fatal("tools list does not contain get_changed_symbols")
+	}
+
+	desc, _ := tool["description"].(string)
+	if !strings.Contains(desc, "enclosing") {
+		t.Errorf("get_changed_symbols description must mention %q; got: %s", "enclosing", desc)
+	}
+	if !strings.Contains(desc, "reason") {
+		t.Errorf("get_changed_symbols description must mention the reason field; got: %s", desc)
+	}
+}

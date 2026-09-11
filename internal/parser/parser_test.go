@@ -758,3 +758,110 @@ func TestTSUnusedTypeStillReported(t *testing.T) {
 		t.Errorf("ref tags for _Unused = %d, want 0 (no self-reference); got %+v", n, tags)
 	}
 }
+
+// endLineOf returns the EndLine of the first def tag with the given name and
+// kind, or -1 if absent.
+func endLineOf(tags []Tag, name, kind string) int {
+	for _, t := range tags {
+		if t.Name == name && t.Kind == kind {
+			return t.EndLine
+		}
+	}
+	return -1
+}
+
+// TestPythonFunctionDefEndLine: a def spanning several lines gets an EndLine
+// equal to the function's last line (GH-4).
+func TestPythonFunctionDefEndLine(t *testing.T) {
+	src := "def f():\n" + // 1
+		"    a = 1\n" + // 2
+		"    b = 2\n" + // 3
+		"    return a + b\n" // 4
+	tags := parsePy(t, src)
+	if got := endLineOf(tags, "f", "function"); got != 4 {
+		t.Errorf("function f EndLine = %d, want 4 (last body line); got %+v", got, tags)
+	}
+}
+
+// TestPythonClassEndLineCoversMethod: a class's EndLine extends to the end of
+// its last member (>= the method's EndLine) (GH-4).
+func TestPythonClassEndLineCoversMethod(t *testing.T) {
+	src := "class C:\n" + // 1
+		"    def m(self):\n" + // 2
+		"        return 1\n" // 3
+	tags := parsePy(t, src)
+	classEnd := endLineOf(tags, "C", "class")
+	// Python methods parse as function_definition, so Kind is "function".
+	methodEnd := endLineOf(tags, "m", "function")
+	if classEnd != 3 {
+		t.Errorf("class C EndLine = %d, want 3; got %+v", classEnd, tags)
+	}
+	if methodEnd != 3 {
+		t.Errorf("method m EndLine = %d, want 3; got %+v", methodEnd, tags)
+	}
+	if classEnd < methodEnd {
+		t.Errorf("class EndLine %d < method EndLine %d; class span must contain the method", classEnd, methodEnd)
+	}
+}
+
+// TestGoFunctionDefEndLine: a Go function's EndLine is the closing brace line
+// (GH-4).
+func TestGoFunctionDefEndLine(t *testing.T) {
+	src := "package p\n" + // 1
+		"\n" + // 2
+		"func f() int {\n" + // 3
+		"\tx := 1\n" + // 4
+		"\treturn x\n" + // 5
+		"}\n" // 6
+	tags := parseGo(t, src)
+	if got := endLineOf(tags, "f", "function"); got != 6 {
+		t.Errorf("function f EndLine = %d, want 6; got %+v", got, tags)
+	}
+}
+
+// TestTSMethodDefEndLine: a TS class method's EndLine is the method's closing
+// brace line (GH-4).
+func TestTSMethodDefEndLine(t *testing.T) {
+	src := "class C {\n" + // 1
+		"    m() {\n" + // 2
+		"        return 1;\n" + // 3
+		"    }\n" + // 4
+		"}\n" // 5
+	tags := parseTS(t, src)
+	if got := endLineOf(tags, "m", "method"); got != 4 {
+		t.Errorf("method m EndLine = %d, want 4; got %+v", got, tags)
+	}
+	if got := endLineOf(tags, "C", "class"); got != 5 {
+		t.Errorf("class C EndLine = %d, want 5; got %+v", got, tags)
+	}
+}
+
+// TestModuleLevelVariableEndLineEqualsLine: a bare module-level variable has
+// no declaration ancestor, so EndLine == Line (GH-4).
+func TestModuleLevelVariableEndLineEqualsLine(t *testing.T) {
+	tags := parsePy(t, "x = 1\n")
+	for _, tag := range tags {
+		if tag.Name == "x" && tag.Kind == "variable" {
+			if tag.EndLine != tag.Line {
+				t.Errorf("module-level variable x EndLine = %d, want Line %d", tag.EndLine, tag.Line)
+			}
+			return
+		}
+	}
+	t.Fatal("missing variable def x")
+}
+
+// TestRefsKeepEndLineZero: reference tags never carry a span (GH-4).
+func TestRefsKeepEndLineZero(t *testing.T) {
+	src := "def f():\n" +
+		"    return g()\n"
+	tags := parsePy(t, src)
+	for _, tag := range tags {
+		if tag.Kind == "ref" && tag.EndLine != 0 {
+			t.Errorf("ref %s EndLine = %d, want 0; got %+v", tag.Name, tag.EndLine, tags)
+		}
+	}
+	if !hasTag(tags, "g", "ref") {
+		t.Fatalf("expected ref g; got %+v", tags)
+	}
+}

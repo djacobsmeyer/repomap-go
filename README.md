@@ -155,7 +155,7 @@ repomap events                # pretty-print SSE stream to terminal
 | `search_identifiers` | `project_root`, `query`, `filter` (defs/refs/both), `kinds`, `limit` | Find functions/classes/variables by name. For markdown: filter by `kinds: ["heading-1","heading-2","heading-3"]` |
 | `get_blast_radius` | `project_root`, `symbol`, `file` (optional), `depth` (default 3) | Every file and symbol that transitively depends on a given symbol |
 | `find_dead_code` | `project_root`, `min_rank`, `unexported_only`, `exported_only`, `kinds`, `include_test_orphans`, `include_doc_orphans`, `include_test_symbols` | Symbols defined but never referenced, plus orphan files (each with `lang` and `category`: source/test/docs; dead symbols carry `category` too). Recommended: `unexported_only: true` with `kinds: ["function","method","class"]`; test and docs orphans and test-file symbols are hidden by default |
-| `get_changed_symbols` | `project_root`, `git_ref` OR `diff`, `include_blast_radius` | Symbols whose definitions fall within changed line ranges |
+| `get_changed_symbols` | `project_root`, `git_ref` OR `diff`, `include_blast_radius` | Symbols whose definitions fall within changed line ranges; body edits are attributed to the innermost enclosing definition (each result carries `reason`: definition or body) |
 
 ### Accuracy notes
 

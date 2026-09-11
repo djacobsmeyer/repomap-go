@@ -214,7 +214,7 @@ func (s *Server) toolsList() []map[string]any {
 		},
 		{
 			"name":        "get_changed_symbols",
-			"description": "Given a git ref or unified diff, returns the symbols whose definitions fall within changed line ranges. Optionally includes blast radius for each changed symbol.",
+			"description": "Given a git ref or unified diff, returns the symbols whose definitions fall within changed line ranges. Definitions carry a span (definition line through their closing line), so a change inside a function or class body is attributed to the innermost enclosing definition. Each result carries a reason field: \"definition\" when a changed range touches the definition line itself, \"body\" when the change falls only inside the definition's body. Optionally includes blast radius for each changed symbol.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -502,7 +502,7 @@ func (s *Server) explainMessage() string {
 	b.WriteString("| " + in("search_identifiers") + " | " + in("project_root") + ", " + in("query") + " | " + in("filter") + " (defs/refs/both), " + in("kinds") + " (function, method, class, etc.), " + in("limit") + " (default 50) | Find functions, classes, or variables by name. Use " + in("filter: \"defs\"") + " to see definitions only, " + in("\"refs\"") + " for callers. |\n")
 	b.WriteString("| " + in("get_blast_radius") + " | " + in("project_root") + ", " + in("symbol") + " | " + in("file") + " (when symbol is overloaded), " + in("depth") + " (default 3, max 10) | Returns every file and symbol that transitively depends on the given symbol. **Call this BEFORE renaming or deleting** anything. |\n")
 	b.WriteString("| " + in("find_dead_code") + " | " + in("project_root") + " | " + in("min_rank") + " (default 0.001), " + in("unexported_only") + " (default false), " + in("exported_only") + " (default false), " + in("kinds") + ", " + in("include_test_orphans") + " (default false), " + in("include_doc_orphans") + " (default false), " + in("include_test_symbols") + " (default false) | Returns symbols defined but never referenced, plus orphan files (each with " + in("lang") + " and " + in("category") + ": source|test|docs). Recommended recipe: " + in("unexported_only: true") + " with " + in("kinds: [\"function\",\"method\",\"class\"]") + " (exported symbols and reflection-called code produce false positives). Test and docs orphans are hidden by default; the " + in("include_*") + " flags reveal them. Dead symbols from test files are hidden by default (test runners discover them, so they are never referenced by name) — set " + in("include_test_symbols") + " to reveal them. |\n")
-	b.WriteString("| " + in("get_changed_symbols") + " | " + in("project_root") + " | " + in("git_ref") + " (e.g. \"HEAD~1\") OR " + in("diff") + " (raw unified diff), " + in("include_blast_radius") + " (default false) | Returns symbols whose definitions fall within changed line ranges. Use for PR reviews or before merging. |\n\n")
+	b.WriteString("| " + in("get_changed_symbols") + " | " + in("project_root") + " | " + in("git_ref") + " (e.g. \"HEAD~1\") OR " + in("diff") + " (raw unified diff), " + in("include_blast_radius") + " (default false) | Returns symbols whose definitions fall within changed line ranges; a change inside a definition's body is attributed to the innermost enclosing definition (each result carries " + in("reason") + ": definition or body). Use for PR reviews or before merging. |\n\n")
 
 	b.WriteString("## SSE Event Stream\n\n")
 	b.WriteString("For human monitoring, the daemon exposes a Server-Sent Events stream:\n\n")
@@ -522,7 +522,7 @@ func (s *Server) explainMessage() string {
 	b.WriteString("**Example 2: Before merging a PR**\n\n")
 	b.WriteString("You've committed changes on a feature branch and want to understand the impact:\n\n")
 	b.WriteString("1. Call " + in("get_changed_symbols") + " with " + in("git_ref: \"main\"") + " and " + in("include_blast_radius: true") + "\n")
-	b.WriteString("2. Review each changed symbol's blast radius\n")
+	b.WriteString("2. Review each changed symbol's blast radius — " + in("reason: \"definition\"") + " means the definition line itself changed; " + in("reason: \"body\"") + " means the change fell inside the definition's body and was attributed to its enclosing definition\n")
 	b.WriteString("3. For high-risk symbols, call " + in("repo_map") + " with " + in("force_refresh: true") + " to get the latest structural map\n\n")
 
 	b.WriteString("**Example 3: Cleaning up old code**\n\n")
