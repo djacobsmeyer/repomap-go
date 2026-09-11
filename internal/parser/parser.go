@@ -22,6 +22,12 @@ import (
 type Tag struct {
 	RelFile string `json:"rel_file"`
 	Line    int    `json:"line"`
+	// EndLine is the last line (1-based, inclusive) of the definition's
+	// span: the end line of the nearest ancestor declaration node
+	// (function/class/method/etc.). A definition with no such ancestor
+	// (e.g. a bare module-level variable) has EndLine == Line. Reference
+	// tags keep EndLine 0.
+	EndLine int    `json:"end_line,omitempty"`
 	Name    string `json:"name"`
 	// Kind is one of: "function", "method", "class", "interface",
 	// "type", "variable", "constant" for definitions; "ref" for references;
@@ -215,7 +221,7 @@ const pyQuery = `
 // semantics, capture filtering, the markdown parse path). Bump it whenever
 // the parser changes in a way the query strings alone do not capture, so
 // tags cached by an older build are invalidated.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // CacheVersion returns a hex sha256 fingerprint of the parser's tag schema:
 // the schemaVersion counter plus every tree-sitter query and the markdown
@@ -245,6 +251,47 @@ func insideFunctionScope(node *sitter.Node, scopeTypes ...string) bool {
 		}
 	}
 	return false
+}
+
+// declarationNodeTypes lists the tree-sitter node types that delimit a
+// definition's span for the given language: the nearest ancestor of a
+// captured name node of one of these types is the declaration the
+// definition belongs to.
+func declarationNodeTypes(lang string) []string {
+	switch lang {
+	case "python":
+		return []string{"function_definition", "class_definition"}
+	case "go":
+		return []string{"function_declaration", "method_declaration", "type_declaration",
+			"var_declaration", "const_declaration"}
+	case "typescript", "javascript":
+		return []string{"function_declaration", "generator_function_declaration", "method_definition",
+			"class_declaration", "abstract_class_declaration", "interface_declaration",
+			"type_alias_declaration", "lexical_declaration", "variable_declaration",
+			"public_field_definition"}
+	}
+	return nil
+}
+
+// definitionEndLine returns the last line (1-based, inclusive) of the
+// definition's span: the end line of the nearest ancestor that is a
+// declaration node for the language. A definition with no such ancestor
+// (e.g. a module-level variable) spans only its own line.
+func definitionEndLine(node *sitter.Node, lang string, line int) int {
+	types := declarationNodeTypes(lang)
+	if len(types) == 0 {
+		return line
+	}
+	want := make(map[string]bool, len(types))
+	for _, t := range types {
+		want[t] = true
+	}
+	for p := node.Parent(); p != nil; p = p.Parent() {
+		if want[p.Type()] {
+			return int(p.EndPoint().Row) + 1
+		}
+	}
+	return line
 }
 
 // kindFromCapture maps tree-sitter capture names like
@@ -392,9 +439,15 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			if lang == "python" && kind == "ref" && (name == "self" || name == "cls") {
 				continue
 			}
+			line := int(node.StartPoint().Row) + 1
+			endLine := 0
+			if kind != "ref" {
+				endLine = definitionEndLine(node, lang, line)
+			}
 			tags = append(tags, Tag{
 				RelFile: relpath,
-				Line:    int(node.StartPoint().Row) + 1,
+				Line:    line,
+				EndLine: endLine,
 				Name:    name,
 				Kind:    kind,
 				Lang:    lang,
