@@ -88,8 +88,25 @@ const tsQuery = `
 (interface_declaration name: (type_identifier) @name.definition.interface)
 (type_alias_declaration name: (type_identifier) @name.definition.type)
 (variable_declarator name: (identifier) @name.definition.variable)
+(public_field_definition name: (property_identifier) @name.definition.variable)
 (call_expression function: (identifier) @name.reference.call)
 (call_expression function: (member_expression property: (property_identifier) @name.reference.call))
+(arguments (identifier) @name.reference.value)
+(object (pair value: (identifier) @name.reference.value))
+(variable_declarator value: (identifier) @name.reference.value)
+(assignment_expression right: (identifier) @name.reference.value)
+(array (identifier) @name.reference.value)
+(return_statement (identifier) @name.reference.value)
+(member_expression object: (identifier) @name.reference.value)
+(member_expression property: (property_identifier) @name.reference.value)
+(subscript_expression object: (identifier) @name.reference.value)
+(subscript_expression index: (identifier) @name.reference.value)
+(new_expression constructor: (identifier) @name.reference.value)
+(type_annotation (type_identifier) @name.reference.value)
+(type_annotation (union_type (type_identifier) @name.reference.value))
+(type_annotation (generic_type name: (type_identifier) @name.reference.value))
+(type_arguments (type_identifier) @name.reference.value)
+(type_alias_declaration value: (type_identifier) @name.reference.value)
 `
 
 const goQuery = `
@@ -100,6 +117,36 @@ const goQuery = `
 (const_declaration (const_spec name: (identifier) @name.definition.constant))
 (call_expression function: (identifier) @name.reference.call)
 (call_expression function: (selector_expression field: (field_identifier) @name.reference.call))
+(argument_list (identifier) @name.reference.value)
+(composite_literal type: (type_identifier) @name.reference.value)
+(composite_literal (literal_value (literal_element (identifier) @name.reference.value)))
+(composite_literal (literal_value (keyed_element (literal_element (identifier)) (literal_element (identifier) @name.reference.value))))
+(binary_expression left: (identifier) @name.reference.value)
+(binary_expression right: (identifier) @name.reference.value)
+(assignment_statement (expression_list (identifier) @name.reference.value))
+(short_var_declaration right: (expression_list (identifier) @name.reference.value))
+(var_spec type: (type_identifier) @name.reference.value)
+(var_spec (expression_list (identifier) @name.reference.value))
+(const_spec type: (type_identifier) @name.reference.value)
+(const_spec (expression_list (identifier) @name.reference.value))
+(return_statement (expression_list (identifier) @name.reference.value))
+(selector_expression operand: (identifier) @name.reference.value)
+(selector_expression field: (field_identifier) @name.reference.value)
+(parameter_declaration type: (type_identifier) @name.reference.value)
+(function_declaration result: (type_identifier) @name.reference.value)
+(method_declaration result: (type_identifier) @name.reference.value)
+(field_declaration type: (type_identifier) @name.reference.value)
+(pointer_type (type_identifier) @name.reference.value)
+(slice_type (type_identifier) @name.reference.value)
+(array_type element: (type_identifier) @name.reference.value)
+(map_type key: (type_identifier) @name.reference.value)
+(map_type value: (type_identifier) @name.reference.value)
+(channel_type value: (type_identifier) @name.reference.value)
+(type_assertion_expression type: (type_identifier) @name.reference.value)
+(type_assertion_expression operand: (identifier) @name.reference.value)
+(type_arguments (type_elem (type_identifier) @name.reference.value))
+(function_type (parameter_list (parameter_declaration type: (type_identifier) @name.reference.value)))
+(function_type result: (type_identifier) @name.reference.value)
 `
 
 const pyQuery = `
@@ -112,7 +159,9 @@ const pyQuery = `
 (keyword_argument value: (identifier) @name.reference.value)
 (pair value: (identifier) @name.reference.value)
 (assignment right: (identifier) @name.reference.value)
+(generic_type (identifier) @name.reference.value)
 (default_parameter value: (identifier) @name.reference.value)
+(typed_default_parameter value: (identifier) @name.reference.value)
 (decorator (identifier) @name.reference.value)
 (return_statement (identifier) @name.reference.value)
 (return_statement (expression_list (identifier) @name.reference.value))
@@ -138,6 +187,28 @@ const pyQuery = `
 (lambda body: (identifier) @name.reference.value)
 (yield (identifier) @name.reference.value)
 (assert_statement (identifier) @name.reference.value)
+(pair key: (identifier) @name.reference.value)
+(except_clause (identifier) @name.reference.value)
+(except_clause (tuple (identifier) @name.reference.value))
+(except_clause (as_pattern (identifier) @name.reference.value))
+(raise_statement (identifier) @name.reference.value)
+(raise_statement cause: (identifier) @name.reference.value)
+(type (identifier) @name.reference.value)
+(for_in_clause right: (identifier) @name.reference.value)
+(if_clause (identifier) @name.reference.value)
+(list_comprehension body: (identifier) @name.reference.value)
+(set_comprehension body: (identifier) @name.reference.value)
+(generator_expression body: (identifier) @name.reference.value)
+(list_splat (identifier) @name.reference.value)
+(dictionary_splat (identifier) @name.reference.value)
+(await (identifier) @name.reference.value)
+(augmented_assignment right: (identifier) @name.reference.value)
+(elif_clause condition: (identifier) @name.reference.value)
+(slice (identifier) @name.reference.value)
+(delete_statement (identifier) @name.reference.value)
+(parenthesized_expression (identifier) @name.reference.value)
+(subscript subscript: (identifier) @name.reference.value)
+(attribute attribute: (identifier) @name.reference.value)
 `
 
 // schemaVersion is a manual counter for non-query parser changes (Tag
@@ -294,6 +365,21 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 			// false positives in dead-code analysis.
 			if lang == "python" && kind == "variable" &&
 				insideFunctionScope(node, "function_definition", "lambda") {
+				continue
+			}
+			// TypeScript/JavaScript (Class A fix, GH-2): a variable_declarator
+			// inside a function body is a local. Package-level and class-field
+			// declarations (no function ancestor) stay.
+			if (lang == "typescript" || lang == "javascript") && kind == "variable" &&
+				insideFunctionScope(node, "function_declaration", "function_expression",
+					"arrow_function", "method_definition",
+					"generator_function_declaration", "generator_function_expression") {
+				continue
+			}
+			// Go (Class A fix, GH-2): var/const specs inside a function or
+			// method body are locals. Package-level declarations stay.
+			if lang == "go" && (kind == "variable" || kind == "constant") &&
+				insideFunctionScope(node, "function_declaration", "method_declaration", "func_literal") {
 				continue
 			}
 			name := node.Content(data)
