@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
@@ -237,17 +238,17 @@ func CacheVersion() string {
 // insideFunctionScope reports whether node is nested inside any ancestor
 // whose type is one of scopeTypes (e.g. "function_definition", "lambda").
 // The node itself is not checked, only its ancestors up to the root.
+// A simple slice scan is used instead of a per-call map (GH-5): the
+// scope-type lists are tiny and the ancestor walk is short.
 func insideFunctionScope(node *sitter.Node, scopeTypes ...string) bool {
 	if len(scopeTypes) == 0 {
 		return false
 	}
-	want := make(map[string]bool, len(scopeTypes))
-	for _, t := range scopeTypes {
-		want[t] = true
-	}
 	for p := node.Parent(); p != nil; p = p.Parent() {
-		if want[p.Type()] {
-			return true
+		for _, t := range scopeTypes {
+			if p.Type() == t {
+				return true
+			}
 		}
 	}
 	return false
@@ -328,6 +329,32 @@ func languageAndQuery(lang string) (*sitter.Language, string, bool) {
 	return nil, "", false
 }
 
+// compiledQueries caches compiled tree-sitter queries per language. A
+// *sitter.Query is immutable after compilation, so one compiled query can be
+// shared across cursors and goroutines (GH-5). Cached queries are never
+// closed.
+var (
+	compiledQueries   = map[string]*sitter.Query{}
+	compiledQueriesMu sync.Mutex
+)
+
+// compiledQueryFor returns the compiled query for lang, compiling it on first
+// use and reusing the cached instance thereafter. ok is false on a query
+// compile error (soft failure, same as before).
+func compiledQueryFor(lang string, tsLang *sitter.Language, queryStr string) (q *sitter.Query, ok bool) {
+	compiledQueriesMu.Lock()
+	defer compiledQueriesMu.Unlock()
+	if cached, hit := compiledQueries[lang]; hit {
+		return cached, true
+	}
+	q, err := sitter.NewQuery([]byte(queryStr), tsLang)
+	if err != nil {
+		return nil, false
+	}
+	compiledQueries[lang] = q
+	return q, true
+}
+
 // ParseFile parses a single file rooted at `root` (relpath is relative to root)
 // and returns the extracted tags. On any soft error (parse failure, query
 // failure) it returns an empty slice without surfacing the error.
@@ -374,12 +401,12 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 		return nil, nil
 	}
 
-	q, err := sitter.NewQuery([]byte(queryStr), tsLang)
-	if err != nil {
+	q, ok := compiledQueryFor(lang, tsLang, queryStr)
+	if !ok {
 		// query compile error — soft fail
 		return nil, nil
 	}
-	defer q.Close()
+	// q is a cached, shared query — never Close it here (GH-5).
 
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()

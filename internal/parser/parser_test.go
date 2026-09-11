@@ -865,3 +865,79 @@ func TestRefsKeepEndLineZero(t *testing.T) {
 		t.Fatalf("expected ref g; got %+v", tags)
 	}
 }
+
+// pyBenchmarkSource is a representative Python module used by
+// BenchmarkParseFilePython: defs, methods, calls, comprehensions, f-strings.
+const pyBenchmarkSource = `
+import os
+from collections import defaultdict
+
+_CACHE = {}
+
+def build_index(root):
+    index = defaultdict(list)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if name.endswith(".py"):
+                index[name].append(os.path.join(dirpath, name))
+    return dict(index)
+
+class Registry:
+    def __init__(self, name):
+        self.name = name
+        self._entries = []
+
+    def register(self, key, value):
+        self._entries.append((key, value))
+        return len(self._entries)
+
+    def lookup(self, key):
+        for k, v in self._entries:
+            if k == key:
+                return v
+        return None
+
+def summarize(index):
+    return {name: len(paths) for name, paths in index.items() if paths}
+`
+
+// TestParseFileQueryCacheTransparent: two ParseFile calls for the same
+// language yield identical tags, proving the per-language compiled-query
+// cache (GH-5) does not change extraction results.
+func TestParseFileQueryCacheTransparent(t *testing.T) {
+	src := "def f(a, b):\n" +
+		"    total = a + b\n" +
+		"    return [x * total for x in (a, b)]\n" +
+		"MOD = f(1, 2)\n"
+	first := parsePy(t, src)
+	second := parsePy(t, src)
+	if len(first) != len(second) {
+		t.Fatalf("tag count differs across calls: %d != %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("tag %d differs across calls: %+v != %+v", i, first[i], second[i])
+		}
+	}
+}
+
+// BenchmarkParseFilePython measures end-to-end ParseFile cost for a Python
+// file, including the (now cached) query compile path (GH-5).
+func BenchmarkParseFilePython(b *testing.B) {
+	dir, err := os.MkdirTemp("", "repomap-bench")
+	if err != nil {
+		b.Fatalf("mkdir temp: %v", err)
+	}
+	b.Cleanup(func() { os.RemoveAll(dir) })
+	rel := "bench.py"
+	if err := os.WriteFile(filepath.Join(dir, rel), []byte(pyBenchmarkSource), 0o644); err != nil {
+		b.Fatalf("write fixture: %v", err)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := ParseFile(dir, rel); err != nil {
+			b.Fatalf("ParseFile: %v", err)
+		}
+	}
+}
