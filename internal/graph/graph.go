@@ -542,6 +542,12 @@ func isUnexported(name, lang string) bool {
 	return false
 }
 
+// DefaultMinRank is the PageRank floor FindDeadCode applies when
+// DeadCodeOptions.MinRank is unset (zero value) or non-positive. PageRank
+// never yields an exact 0, so a zero MinRank would silently return no orphans;
+// DefaultMinRank keeps the MCP-layer default as the single source of truth.
+const DefaultMinRank float32 = 0.001
+
 // DeadCodeOptions controls FindDeadCode filtering.
 type DeadCodeOptions struct {
 	// MinRank: orphan candidates with PageRank above this are excluded.
@@ -587,6 +593,14 @@ func FindDeadCode(
 	ranks map[string]float32,
 	opts DeadCodeOptions,
 ) DeadCodeResult {
+	// A zero or negative MinRank (e.g. DeadCodeOptions{}) must not mean
+	// "PageRank exactly 0" — no file ever has rank 0, which would silently
+	// yield no orphans (GH-5). Default to DefaultMinRank instead.
+	minRank := opts.MinRank
+	if minRank <= 0 {
+		minRank = DefaultMinRank
+	}
+
 	referenced := map[string]struct{}{}
 	for _, tags := range tagsByFile {
 		for _, t := range tags {
@@ -656,7 +670,7 @@ func FindDeadCode(
 				continue
 			}
 			r := ranks[f]
-			if r > opts.MinRank {
+			if r > minRank {
 				continue
 			}
 			lang, category := ClassifyFile(f)
