@@ -154,14 +154,15 @@ repomap events                # pretty-print SSE stream to terminal
 | `repo_map` | `project_root`, `map_tokens` (default 8192), `chat_files`, `force_refresh` | Ranked structural map of the project — definitions only, sorted by PageRank |
 | `search_identifiers` | `project_root`, `query`, `filter` (defs/refs/both), `kinds`, `limit` | Find functions/classes/variables by name. For markdown: filter by `kinds: ["heading-1","heading-2","heading-3"]` |
 | `get_blast_radius` | `project_root`, `symbol`, `file` (optional), `depth` (default 3) | Every file and symbol that transitively depends on a given symbol |
-| `find_dead_code` | `project_root`, `min_rank`, `unexported_only`, `exported_only`, `kinds`, `include_test_orphans`, `include_doc_orphans` | Symbols defined but never referenced, plus orphan files (each with `lang` and `category`: source/test/docs). Recommended: `unexported_only: true` with `kinds: ["function","method","class"]`; test and docs orphans are hidden by default |
+| `find_dead_code` | `project_root`, `min_rank`, `unexported_only`, `exported_only`, `kinds`, `include_test_orphans`, `include_doc_orphans`, `include_test_symbols` | Symbols defined but never referenced, plus orphan files (each with `lang` and `category`: source/test/docs; dead symbols carry `category` too). Recommended: `unexported_only: true` with `kinds: ["function","method","class"]`; test and docs orphans and test-file symbols are hidden by default |
 | `get_changed_symbols` | `project_root`, `git_ref` OR `diff`, `include_blast_radius` | Symbols whose definitions fall within changed line ranges |
 
 ### Accuracy notes
 
 - **Python locals are excluded** — a `variable` definition is only tagged at module or class scope; assignments inside functions/lambdas are locals and never appear in results.
 - **Bare-name uses count as references** — a name used as a callback argument, dict/list value, assignment RHS, default parameter, decorator, or attribute/subscript object keeps its definition alive.
-- **Orphan files are categorized** — each `orphan_files` entry has `lang` and `category` (`source`|`test`|`docs`); test and docs files are hidden by default and revealed with `include_test_orphans` / `include_doc_orphans`.
+- **Orphan files are categorized** — each `orphan_files` entry has `lang` and `category` (`source`|`test`|`docs`); test and docs files are hidden by default and revealed with `include_test_orphans` / `include_doc_orphans`. A file is classified `test` when its basename matches `test_*.py`, `*_test.py`, `conftest.py`, `*_test.go`, `*.test.{js,jsx,ts,tsx}`, or `*.spec.{js,jsx,ts,tsx}`, or when a directory segment is `tests`, `__tests__`, or `testdata` anywhere in the path, or `test` as the file's immediate parent directory (`internal/test/harness.go` is test, `internal/test/util/helpers.go` is source; `spec/` is never a test directory, so `myapp/spec/openapi.py` is source).
+- **Dead symbols are categorized and test-file symbols are hidden** — each `dead_symbols` entry carries `category` (`source`|`test`|`docs`). Symbols defined in `test` files are hidden by default because test runners discover them and they are never referenced by name (every pytest `test_*` function or Go `TestXxx` would otherwise look dead); set `include_test_symbols: true` to reveal them. Docs symbols (markdown headings) are never hidden — knowledge-base users rely on them.
 
 ## Markdown / knowledge base support
 

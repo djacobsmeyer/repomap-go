@@ -196,7 +196,7 @@ func (s *Server) toolsList() []map[string]any {
 		},
 		{
 			"name":        "find_dead_code",
-			"description": "Returns symbols defined but never referenced in the project, and files with no importers. For actionable results, combine unexported_only: true with kinds: [\"function\",\"method\",\"class\"] — exported symbols and reflection-called code produce false positives, and module-level variables/constants are rarely worth deleting; add \"variable\"/\"constant\" to kinds only if you specifically want them. orphan_files hides test and docs files by default (they legitimately have no importers); each orphan carries lang and category (source|test|docs), and include_test_orphans / include_doc_orphans reveal the hidden ones.",
+			"description": "Returns symbols defined but never referenced in the project, and files with no importers. For actionable results, combine unexported_only: true with kinds: [\"function\",\"method\",\"class\"] — exported symbols and reflection-called code produce false positives, and module-level variables/constants are rarely worth deleting; add \"variable\"/\"constant\" to kinds only if you specifically want them. orphan_files hides test and docs files by default (they legitimately have no importers); each orphan carries lang and category (source|test|docs), and include_test_orphans / include_doc_orphans reveal the hidden ones. dead_symbols carries category (source|test|docs); symbols defined in test files (test runners discover them, so they are never referenced by name) are hidden by default — set include_test_symbols to reveal them.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -207,6 +207,7 @@ func (s *Server) toolsList() []map[string]any {
 					"kinds":                map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Filter by symbol kind: function, method, class, interface, type, variable, constant, def, ref. For Python, \"variable\" means module- or class-level assignments only — function locals are never tagged."},
 					"include_test_orphans": map[string]any{"type": "boolean", "default": false, "description": "Also list test files (test_*.py, *_test.go, *.spec.ts, tests/ dirs…) in orphan_files. Hidden by default because test files legitimately have no importers."},
 					"include_doc_orphans":  map[string]any{"type": "boolean", "default": false, "description": "Also list markdown/docs files in orphan_files. Hidden by default because nothing imports a doc."},
+					"include_test_symbols": map[string]any{"type": "boolean", "default": false, "description": "Also list dead symbols defined in test files (e.g. pytest test_* functions, Go TestXxx). Hidden by default because test functions are discovered by the runner and never referenced by name."},
 				},
 				"required": []string{"project_root"},
 			},
@@ -297,6 +298,7 @@ type findDeadCodeArgs struct {
 	Kinds              []string `json:"kinds"`
 	IncludeTestOrphans bool     `json:"include_test_orphans"`
 	IncludeDocOrphans  bool     `json:"include_doc_orphans"`
+	IncludeTestSymbols bool     `json:"include_test_symbols"`
 }
 
 func (s *Server) toolFindDeadCode(raw json.RawMessage) (any, *RPCError) {
@@ -322,6 +324,7 @@ func (s *Server) toolFindDeadCode(raw json.RawMessage) (any, *RPCError) {
 		Kinds:              args.Kinds,
 		IncludeTestOrphans: args.IncludeTestOrphans,
 		IncludeDocOrphans:  args.IncludeDocOrphans,
+		IncludeTestSymbols: args.IncludeTestSymbols,
 	}
 	res := s.project.FindDeadCode(opts)
 	body, err := json.Marshal(res)
@@ -498,7 +501,7 @@ func (s *Server) explainMessage() string {
 	b.WriteString("| " + in("repo_map") + " | " + in("project_root") + " | " + in("map_tokens") + " (default 8192), " + in("chat_files") + ", " + in("force_refresh") + " | Get a PageRank-sorted structural map of the project. Use for overview before any edit, or when you need the big picture. |\n")
 	b.WriteString("| " + in("search_identifiers") + " | " + in("project_root") + ", " + in("query") + " | " + in("filter") + " (defs/refs/both), " + in("kinds") + " (function, method, class, etc.), " + in("limit") + " (default 50) | Find functions, classes, or variables by name. Use " + in("filter: \"defs\"") + " to see definitions only, " + in("\"refs\"") + " for callers. |\n")
 	b.WriteString("| " + in("get_blast_radius") + " | " + in("project_root") + ", " + in("symbol") + " | " + in("file") + " (when symbol is overloaded), " + in("depth") + " (default 3, max 10) | Returns every file and symbol that transitively depends on the given symbol. **Call this BEFORE renaming or deleting** anything. |\n")
-	b.WriteString("| " + in("find_dead_code") + " | " + in("project_root") + " | " + in("min_rank") + " (default 0.001), " + in("unexported_only") + " (default false), " + in("exported_only") + " (default false), " + in("kinds") + ", " + in("include_test_orphans") + " (default false), " + in("include_doc_orphans") + " (default false) | Returns symbols defined but never referenced, plus orphan files (each with " + in("lang") + " and " + in("category") + ": source|test|docs). Recommended recipe: " + in("unexported_only: true") + " with " + in("kinds: [\"function\",\"method\",\"class\"]") + " (exported symbols and reflection-called code produce false positives). Test and docs orphans are hidden by default; the " + in("include_*") + " flags reveal them. |\n")
+	b.WriteString("| " + in("find_dead_code") + " | " + in("project_root") + " | " + in("min_rank") + " (default 0.001), " + in("unexported_only") + " (default false), " + in("exported_only") + " (default false), " + in("kinds") + ", " + in("include_test_orphans") + " (default false), " + in("include_doc_orphans") + " (default false), " + in("include_test_symbols") + " (default false) | Returns symbols defined but never referenced, plus orphan files (each with " + in("lang") + " and " + in("category") + ": source|test|docs). Recommended recipe: " + in("unexported_only: true") + " with " + in("kinds: [\"function\",\"method\",\"class\"]") + " (exported symbols and reflection-called code produce false positives). Test and docs orphans are hidden by default; the " + in("include_*") + " flags reveal them. Dead symbols from test files are hidden by default (test runners discover them, so they are never referenced by name) — set " + in("include_test_symbols") + " to reveal them. |\n")
 	b.WriteString("| " + in("get_changed_symbols") + " | " + in("project_root") + " | " + in("git_ref") + " (e.g. \"HEAD~1\") OR " + in("diff") + " (raw unified diff), " + in("include_blast_radius") + " (default false) | Returns symbols whose definitions fall within changed line ranges. Use for PR reviews or before merging. |\n\n")
 
 	b.WriteString("## SSE Event Stream\n\n")
@@ -527,7 +530,7 @@ func (s *Server) explainMessage() string {
 	b.WriteString("1. Call " + in("find_dead_code") + " with " + in("unexported_only: true") + " and " + in("kinds: [\"function\",\"method\",\"class\"]") + "\n")
 	b.WriteString("2. Review the returned list — these are symbols defined but never called\n")
 	b.WriteString("3. For questionable cases, call " + in("search_identifiers") + " with " + in("filter: \"refs\"") + " to verify there are truly no callers\n")
-	b.WriteString("4. Each " + in("orphan_files") + " entry carries " + in("category") + " (source|test|docs) and " + in("lang") + " so you can filter the list; use " + in("include_test_orphans") + " / " + in("include_doc_orphans") + " to reveal the test and docs files hidden by default\n\n")
+	b.WriteString("4. Each " + in("orphan_files") + " entry carries " + in("category") + " (source|test|docs) and " + in("lang") + " so you can filter the list; use " + in("include_test_orphans") + " / " + in("include_doc_orphans") + " to reveal the test and docs files hidden by default. Each " + in("dead_symbols") + " entry carries " + in("category") + " too; symbols from test files (runners discover them, so they are never referenced by name) are hidden by default — set " + in("include_test_symbols: true") + " to reveal them\n\n")
 
 	b.WriteString("## Quick Reference\n\n")
 	b.WriteString("- " + in("repomap daemon start") + " — start the background daemon\n")

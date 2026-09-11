@@ -30,7 +30,7 @@ func TestFindDeadCodeSchemaGH1(t *testing.T) {
 	if !ok {
 		t.Fatal("find_dead_code inputSchema has no properties object")
 	}
-	for _, p := range []string{"include_test_orphans", "include_doc_orphans"} {
+	for _, p := range []string{"include_test_orphans", "include_doc_orphans", "include_test_symbols"} {
 		if _, ok := props[p]; !ok {
 			t.Errorf("find_dead_code schema missing property %q", p)
 		}

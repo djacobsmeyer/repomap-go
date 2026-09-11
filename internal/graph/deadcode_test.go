@@ -19,8 +19,14 @@ func TestClassifyFile(t *testing.T) {
 		{"src/a.spec.ts", "typescript", "test"},
 		{"conftest.py", "python", "test"},
 		{"pkg/testdata/x.py", "python", "test"},
+		{"myapp/spec/openapi.py", "python", "source"},
+		{"internal/test/harness.go", "go", "test"},
+		{"internal/test/util/helpers.go", "go", "source"},
 		{"src/engine.py", "python", "source"},
 		{"internal/x.go", "go", "source"},
+		// GH-3: Windows backslash paths must classify identically.
+		{"tests\\helpers.py", "python", "test"},
+		{"docs\\x.md", "markdown", "docs"},
 	}
 	for _, tc := range cases {
 		lang, category := ClassifyFile(tc.relpath)
@@ -110,7 +116,7 @@ func TestFindDeadCodeIncludeFlags(t *testing.T) {
 			t.Errorf("%s category = %q, want %q", file, o.Category, wc.category)
 		}
 	}
-	if strings.Contains(res.Summary, "hidden") {
+	if strings.Contains(res.Summary, "orphans hidden") {
 		t.Errorf("summary must not mention hidden orphans when all included, got %q", res.Summary)
 	}
 }
@@ -142,5 +148,71 @@ func TestFindDeadCodeSymbolFiltersThroughOptions(t *testing.T) {
 	res = FindDeadCode(g, tags, ranks, DeadCodeOptions{MinRank: 0.001})
 	if len(res.DeadSymbols) != 2 {
 		t.Fatalf("no filter: expected both defs reported, got %v", res.DeadSymbols)
+	}
+}
+
+// TestFindDeadCodeTestSymbolCategory is the GH-3 regression: dead symbols
+// carry their file's category, and symbols defined in test files (test
+// runners discover them, so they are never referenced by name) are hidden
+// by default and revealed with IncludeTestSymbols. Docs symbols are never
+// hidden — knowledge-base users rely on them.
+func TestFindDeadCodeTestSymbolCategory(t *testing.T) {
+	tags := map[string][]parser.Tag{
+		"src/engine.py": {
+			{RelFile: "src/engine.py", Line: 1, Name: "Engine", Kind: "class", Lang: "python"},
+		},
+		"tests/test_x.py": {
+			{RelFile: "tests/test_x.py", Line: 1, Name: "test_run", Kind: "function", Lang: "python"},
+		},
+		"docs/x.md": {
+			{RelFile: "docs/x.md", Line: 1, Name: "X", Kind: "heading-1", Lang: "markdown"},
+		},
+	}
+	ranks := map[string]float32{
+		"src/engine.py":   0,
+		"tests/test_x.py": 0,
+		"docs/x.md":       0,
+	}
+	g := Build(tags, nil)
+
+	res := FindDeadCode(g, tags, ranks, DeadCodeOptions{MinRank: 0.001})
+
+	got := map[string]DeadSymbol{}
+	for _, d := range res.DeadSymbols {
+		got[d.Name] = d
+	}
+
+	if _, ok := got["test_run"]; ok {
+		t.Errorf("test-file symbol test_run must be hidden by default, got %v", res.DeadSymbols)
+	}
+	src, ok := got["Engine"]
+	if !ok {
+		t.Fatalf("source symbol Engine missing from %v", res.DeadSymbols)
+	}
+	if src.Category != "source" {
+		t.Errorf("src symbol category = %q, want source", src.Category)
+	}
+	// Docs symbols are NOT hidden (knowledge-base users rely on them).
+	if _, ok := got["X"]; !ok {
+		t.Errorf("docs symbol X must not be hidden, got %v", res.DeadSymbols)
+	}
+	if !strings.Contains(res.Summary, "test symbols hidden") {
+		t.Errorf("summary should mention hidden test symbols, got %q", res.Summary)
+	}
+
+	res = FindDeadCode(g, tags, ranks, DeadCodeOptions{MinRank: 0.001, IncludeTestSymbols: true})
+	got = map[string]DeadSymbol{}
+	for _, d := range res.DeadSymbols {
+		got[d.Name] = d
+	}
+	d, ok := got["test_run"]
+	if !ok {
+		t.Fatalf("test_run must be present with IncludeTestSymbols, got %v", res.DeadSymbols)
+	}
+	if d.Category != "test" {
+		t.Errorf("test_run category = %q, want test", d.Category)
+	}
+	if strings.Contains(res.Summary, "test symbols hidden") {
+		t.Errorf("summary must not claim hidden test symbols when the flag is set, got %q", res.Summary)
 	}
 }
