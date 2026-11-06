@@ -1,6 +1,7 @@
 module github.com/djacobsmeyer/repomap-go
 
 go 1.22
+toolchain go1.26.10
 
 require (
 	github.com/fsnotify/fsnotify v1.7.0

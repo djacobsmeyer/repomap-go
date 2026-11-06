@@ -7,6 +7,7 @@ BINDIR  := $(PREFIX)/bin
 
 .PHONY: build install uninstall clean install-service
 
+# Toolchain is pinned by go.mod (toolchain go1.26.10) and mise.toml.
 build:
 	mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/$(BINARY) $(CMD_PATH)

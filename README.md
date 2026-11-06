@@ -243,8 +243,8 @@ Link destinations are resolved before edges are built:
 
 ## Prerequisites
 
-- Go 1.22+ (install however you prefer — e.g. https://go.dev/dl/, your OS package
-  manager, or a version manager like `mise`)
+- Go 1.26.10 is required for release builds (install however you prefer — e.g.
+  https://go.dev/dl/, your OS package manager, or a version manager like `mise`)
 - A C compiler (`cc`) on `PATH` — the Tree-sitter parser bindings use cgo. macOS:
   Xcode Command Line Tools (`xcode-select --install`). Linux: `build-essential` /
   `gcc` from your distro's package manager.
