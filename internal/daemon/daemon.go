@@ -26,6 +26,29 @@ const (
 	DefaultSSEAddr    = "127.0.0.1:7374"
 )
 
+// Defaults for the SSE server's per-connection timeouts.
+const (
+	// DefaultReadHeaderTimeout bounds how long a client may take to send
+	// request headers. A client that sends a partial request line and stalls
+	// is disconnected once this expires.
+	DefaultReadHeaderTimeout = 5 * time.Second
+	// DefaultReadTimeout bounds reading a full (non-streaming) request.
+	// ServeSSE clears it for the duration of an open /events stream.
+	DefaultReadTimeout = 30 * time.Second
+	// DefaultIdleTimeout bounds how long an idle keep-alive connection (no
+	// active request) stays open. It does not apply while a handler is
+	// running, so a long-lived /events stream is not killed by it.
+	DefaultIdleTimeout = 120 * time.Second
+)
+
+// SSETimeouts configures the SSE http.Server's per-connection timeouts.
+// A zero field means "use the Default* constant for that timeout".
+type SSETimeouts struct {
+	ReadHeader time.Duration
+	Read       time.Duration
+	Idle       time.Duration
+}
+
 // Message is the JSON envelope sent over the control socket.
 type Message struct {
 	Type    string          `json:"type"`
@@ -53,14 +76,21 @@ type Daemon struct {
 	listener  net.Listener
 	sseServer *http.Server
 
+	// sseTimeouts holds the resolved (defaults applied) SSE timeouts.
+	sseTimeouts SSETimeouts
+	// sseBaseCancel cancels the context every SSE handler's r.Context()
+	// derives from, so shutdown can end all open /events streams at once.
+	sseBaseCancel context.CancelFunc
+
 	startedAt time.Time
 }
 
 // Options control the daemon.
 type Options struct {
-	SocketPath string
-	PIDPath    string
-	SSEAddr    string
+	SocketPath  string
+	PIDPath     string
+	SSEAddr     string
+	SSETimeouts SSETimeouts
 }
 
 // New creates a Daemon ready to Start.
@@ -74,12 +104,48 @@ func New(opts Options) *Daemon {
 	if opts.SSEAddr == "" {
 		opts.SSEAddr = DefaultSSEAddr
 	}
+	if opts.SSETimeouts.ReadHeader <= 0 {
+		opts.SSETimeouts.ReadHeader = DefaultReadHeaderTimeout
+	}
+	if opts.SSETimeouts.Read <= 0 {
+		opts.SSETimeouts.Read = DefaultReadTimeout
+	}
+	if opts.SSETimeouts.Idle <= 0 {
+		opts.SSETimeouts.Idle = DefaultIdleTimeout
+	}
 	return &Daemon{
-		projects:   make(map[string]*project.Project),
-		bus:        events.NewBus(),
-		socketPath: opts.SocketPath,
-		pidPath:    opts.PIDPath,
-		sseAddr:    opts.SSEAddr,
+		projects:    make(map[string]*project.Project),
+		bus:         events.NewBus(),
+		socketPath:  opts.SocketPath,
+		pidPath:     opts.PIDPath,
+		sseAddr:     opts.SSEAddr,
+		sseTimeouts: opts.SSETimeouts,
+	}
+}
+
+// newSSEServer builds the SSE http.Server with the resolved timeouts and a
+// BaseContext whose cancellation ends every handler (open /events stream).
+// Start calls this; tests use it directly to exercise the same production
+// configuration without a control socket.
+func (d *Daemon) newSSEServer() *http.Server {
+	if d.sseBaseCancel != nil {
+		// Never lose a previous base cancel func (only reachable if the
+		// server is rebuilt, e.g. in tests).
+		d.sseBaseCancel()
+	}
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	d.sseBaseCancel = baseCancel
+	mux := http.NewServeMux()
+	mux.HandleFunc("/events", d.bus.ServeSSE)
+	return &http.Server{
+		Addr:              d.sseAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: d.sseTimeouts.ReadHeader,
+		ReadTimeout:       d.sseTimeouts.Read,
+		IdleTimeout:       d.sseTimeouts.Idle,
+		BaseContext: func(net.Listener) context.Context {
+			return baseCtx
+		},
 	}
 }
 
@@ -129,13 +195,8 @@ func (d *Daemon) Start(ctx context.Context) error {
 		removeSocketIfOwned(d.socketPath, socketIno)
 	}()
 
-	// SSE server.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/events", d.bus.ServeSSE)
-	d.sseServer = &http.Server{
-		Addr:    d.sseAddr,
-		Handler: mux,
-	}
+	// SSE server (timeouts + BaseContext wired in newSSEServer).
+	d.sseServer = d.newSSEServer()
 	go func() {
 		if err := d.sseServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			// surface via stderr
@@ -171,10 +232,14 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	// Shutdown guarantees — every step below is bounded, so a SIGTERM always
 	// terminates the process promptly:
-	//  1. sseServer.Shutdown is capped by shutdownCtx (5s): it closes idle
-	//     connections and waits at most that long for active SSE handlers,
-	//     which additionally return as soon as their request context is
-	//     cancelled by the server closing the connection.
+	//  1. sseBaseCancel is called first: every SSE handler's r.Context()
+	//     derives from that base context (http.Server.BaseContext), so all
+	//     open /events streams return from ServeSSE promptly (well under a
+	//     second) instead of waiting for their client to disconnect. Then
+	//     sseServer.Shutdown, capped by shutdownCtx (5s), closes idle
+	//     connections and waits for the now-unblocked handlers to finish.
+	//     If Shutdown returns an error (e.g. the cap expires), we fall back
+	//     to sseServer.Close(), which force-closes everything.
 	//  2. Each project's Stop cancels the project's ctx and waits on
 	//     p.done; the project run loop exits on ctx.Done() (it is NOT gated
 	//     on a watcher event), so the wait is bounded by whatever reindex
@@ -189,9 +254,14 @@ func (d *Daemon) Start(ctx context.Context) error {
 	// it spawned (the job); a duplicate daemon auto-started by the STDIO
 	// proxy (or started by hand) is an orphan reparented to launchd pid 1
 	// and is invisible to launchctl, so bootout never sent it SIGTERM.
+	if d.sseBaseCancel != nil {
+		d.sseBaseCancel()
+	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
-	_ = d.sseServer.Shutdown(shutdownCtx)
+	if err := d.sseServer.Shutdown(shutdownCtx); err != nil {
+		_ = d.sseServer.Close()
+	}
 
 	d.mu.Lock()
 	for _, p := range d.projects {

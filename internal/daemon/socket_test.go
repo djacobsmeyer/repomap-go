@@ -46,7 +46,12 @@ func shortTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "repomap-dtest-")
 	if err != nil {
-		t.Fatalf("mkdir temp dir: %v", err)
+		// /tmp may not be writable in some sandboxes; fall back to TMPDIR,
+		// which is short enough for a Unix socket path here.
+		dir, err = os.MkdirTemp(os.TempDir(), "repomap-dtest-")
+		if err != nil {
+			t.Fatalf("mkdir temp dir: %v", err)
+		}
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir

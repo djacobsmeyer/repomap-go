@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// sseWriteDeadline bounds each individual write to an SSE client. A
+// server-wide WriteTimeout would kill long-lived streams, so instead every
+// write gets its own deadline: a client that has stopped reading is dropped,
+// but a healthy stream that simply sits idle between events is never touched.
+const sseWriteDeadline = 10 * time.Second
+
 // Event is a single event emitted onto the bus.
 type Event struct {
 	TS      time.Time              `json:"ts"`
@@ -106,6 +112,12 @@ func (b *Bus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	ch := b.Subscribe(filter, 128)
 	defer b.Unsubscribe(ch)
 
+	// Long-lived stream: the server's ReadTimeout must not apply while the
+	// stream is open (it bounds request reading, not the stream lifetime).
+	// ErrNotSupported is ignored (unwrappable writer missing).
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Time{})
+
 	ctx := r.Context()
 	for {
 		select {
@@ -119,6 +131,9 @@ func (b *Bus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
+			// Per-write deadline: drops a client that stopped reading
+			// without ever killing an idle-but-healthy stream.
+			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 		}
