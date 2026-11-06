@@ -125,14 +125,10 @@ func New(opts Options) *Daemon {
 
 // newSSEServer builds the SSE http.Server with the resolved timeouts and a
 // BaseContext whose cancellation ends every handler (open /events stream).
-// Start calls this; tests use it directly to exercise the same production
-// configuration without a control socket.
+// It stores the base cancel func in d.sseBaseCancel and is called exactly
+// once per daemon (by Start; tests call it directly to exercise the same
+// production configuration without a control socket).
 func (d *Daemon) newSSEServer() *http.Server {
-	if d.sseBaseCancel != nil {
-		// Never lose a previous base cancel func (only reachable if the
-		// server is rebuilt, e.g. in tests).
-		d.sseBaseCancel()
-	}
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	d.sseBaseCancel = baseCancel
 	mux := http.NewServeMux()
@@ -254,9 +250,8 @@ func (d *Daemon) Start(ctx context.Context) error {
 	// it spawned (the job); a duplicate daemon auto-started by the STDIO
 	// proxy (or started by hand) is an orphan reparented to launchd pid 1
 	// and is invisible to launchctl, so bootout never sent it SIGTERM.
-	if d.sseBaseCancel != nil {
-		d.sseBaseCancel()
-	}
+	// Set by newSSEServer above, so it is never nil on this path.
+	d.sseBaseCancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := d.sseServer.Shutdown(shutdownCtx); err != nil {
