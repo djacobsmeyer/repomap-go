@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -17,6 +16,8 @@ import (
 	"github.com/smacker/go-tree-sitter/markdown"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
+
+	"github.com/djacobsmeyer/repomap-go/internal/safefs"
 )
 
 // Tag is a single symbol occurrence found in a file.
@@ -512,8 +513,9 @@ func ParseFile(root, relpath string) ([]Tag, error) {
 		return nil, nil
 	}
 
-	abs := filepath.Join(root, relpath)
-	data, err := os.ReadFile(abs)
+	// Never read through a symlink, never leave root, never block on a
+	// FIFO: see internal/safefs.
+	data, err := safefs.ReadRegular(root, relpath, 0)
 	if err != nil {
 		return nil, err
 	}

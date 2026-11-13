@@ -144,8 +144,28 @@ repomap remove ~/code/api
 repomap list                  # all active projects, index size, last reindex time
 
 repomap mcp ~/code/api        # STDIO proxy — invoked by Claude Code
+repomap mcp --standalone ~/code/api [--cache-dir DIR]
+                              # index + serve MCP in this process over stdio; no daemon, no sockets
+repomap socket ~/code/api     # print the project's MCP socket (registers it; never starts the daemon; exit 3 if down)
 repomap events                # pretty-print SSE stream to terminal
+
+# Every command takes --socket PATH / --pid-file PATH (env REPOMAP_SOCKET /
+# REPOMAP_PID_FILE) to talk to a daemon other than /tmp/repomap-daemon.sock.
+repomap daemon start --allow-root ~/code --allow-root ~/work   # register only projects at/below these (real paths)
+repomap daemon start --project-socket-dir ~/.repomap-sock      # per-project sockets in a private 0700 dir
+repomap daemon start --sse-addr 127.0.0.1:7399                 # e.g. a second, test daemon
 ```
+
+### Running repomap for a sandboxed agent
+
+The daemon is one unconfined process serving every project, and its control
+socket accepts `add`/`mcp_connect`/`remove`/`shutdown` for any path. Never give a
+sandboxed agent that socket. For an agent confined to one worktree (e.g. a macOS
+Seatbelt profile), run `repomap mcp --standalone <worktree>` as the agent's MCP
+server *inside* the same sandbox: it builds the index in-process, watches the tree,
+answers on stdin/stdout and exits on EOF, so every file it reads and writes is
+confined exactly like the agent's own tools. The sandbox needs to allow reading
+(executing) the repomap binary and writing the cache dir; it needs no socket.
 
 ## MCP tools
 
@@ -352,7 +372,11 @@ daemon — no separate `repomap add` step required.
 - `project_root` parameter is validated to be an absolute path within a registered project — no path traversal
 - `.env` files are excluded from parsing (no Tree-sitter grammar; explicitly skipped in file filter)
 - SSE stream is localhost-only by default
-- `git_ref` parameter (Phase 2) validated against `[a-zA-Z0-9._~^/-]+` before shell execution
+- `git_ref` parameter (Phase 2) validated against `[a-zA-Z0-9._~^/-]+`, must not start with `-`, and is passed after `--end-of-options`; git runs with `--no-ext-diff --no-textconv -c core.fsmonitor=false` so repo config cannot make it run commands
+- Project files are never read through symlinks: source files, `.gitignore` and `.repomapignore` are opened through `os.Root` (no escape via `..` or a symlinked directory, race-free), a final-component symlink is skipped even when its target is inside the project (the target is indexed under its own name), and only regular files up to 8 MiB are read (opened non-blocking, so a FIFO cannot hang the daemon). Watcher events whose path leaves the project root (fsnotify's kqueue backend reports symlink targets) are dropped.
+- The tag cache (`<root>/.repomap/` or `--cache-dir`) is refused if the directory or `tags.db` is a symlink, so a planted link cannot make the daemon write outside the project
+- `--allow-root` / `REPOMAP_ALLOWED_ROOTS` restricts `add` and `mcp_connect` to projects whose real path is at or below an allowed root (default: unrestricted, as before)
+- After idle eviction, rehydration re-stats every file instead of trusting the cache, so edits made while the watcher was paused are not served stale
 
 ## License
 

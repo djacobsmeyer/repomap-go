@@ -1,6 +1,6 @@
 module github.com/djacobsmeyer/repomap-go
 
-go 1.22
+go 1.24
 toolchain go1.26.10
 
 require (

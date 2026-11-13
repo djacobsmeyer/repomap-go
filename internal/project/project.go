@@ -19,6 +19,7 @@ import (
 	"github.com/djacobsmeyer/repomap-go/internal/ignore"
 	"github.com/djacobsmeyer/repomap-go/internal/mdresolver"
 	"github.com/djacobsmeyer/repomap-go/internal/parser"
+	"github.com/djacobsmeyer/repomap-go/internal/safefs"
 	"github.com/djacobsmeyer/repomap-go/internal/watcher"
 )
 
@@ -38,6 +39,10 @@ type Project struct {
 	lastMCPCall time.Time
 	lastReindex time.Time
 	socketPath  string
+	// cacheDir is where tags.db lives; empty = <Root>/.repomap.
+	cacheDir string
+	// noSocket skips the per-project MCP Unix socket (standalone stdio mode).
+	noSocket    bool
 	mcpListener net.Listener
 	mcpHandler  func(net.Conn)
 
@@ -73,6 +78,25 @@ func New(root string, bus *events.Bus) (*Project, error) {
 // SocketPath returns the per-project MCP Unix socket path.
 func (p *Project) SocketPath() string { return p.socketPath }
 
+// SetSocketDir places the per-project socket in dir instead of os.TempDir().
+// Call before Start. A dir only the daemon's user can write keeps other
+// local processes (e.g. sandboxed agents that may write $TMPDIR) from
+// unlinking or replacing project sockets.
+func (p *Project) SetSocketDir(dir string) {
+	if dir == "" {
+		return
+	}
+	p.socketPath = filepath.Join(dir, filepath.Base(p.socketPath))
+}
+
+// SetCacheDir sets the tag-cache directory (empty = <Root>/.repomap). Call
+// before Start.
+func (p *Project) SetCacheDir(dir string) { p.cacheDir = dir }
+
+// DisableSocket makes Start skip the per-project MCP socket. Used by the
+// standalone stdio server, which binds nothing.
+func (p *Project) DisableSocket() { p.noSocket = true }
+
 // SetMCPHandler installs the callback invoked for each MCP socket connection.
 // If nil, connections are simply closed.
 func (p *Project) SetMCPHandler(h func(net.Conn)) {
@@ -88,7 +112,7 @@ func (p *Project) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 
-	c, err := cache.Open(p.Root, parser.CacheVersion())
+	c, err := cache.OpenDir(p.Root, p.cacheDir, parser.CacheVersion())
 	if err != nil {
 		return fmt.Errorf("open cache: %w", err)
 	}
@@ -124,10 +148,12 @@ func (p *Project) Start(ctx context.Context) error {
 	p.watcher = w
 	p.mu.Unlock()
 
-	if err := p.startMCPListener(); err != nil {
-		// non-fatal; log via event
-		if p.bus != nil {
-			p.bus.Emit(p.Root, "mcp_listener_error", map[string]interface{}{"error": err.Error()})
+	if !p.noSocket {
+		if err := p.startMCPListener(); err != nil {
+			// non-fatal; log via event
+			if p.bus != nil {
+				p.bus.Emit(p.Root, "mcp_listener_error", map[string]interface{}{"error": err.Error()})
+			}
 		}
 	}
 
@@ -151,7 +177,9 @@ func (p *Project) Stop() error {
 		p.mcpListener.Close()
 		p.mcpListener = nil
 	}
-	_ = os.Remove(p.socketPath)
+	if !p.noSocket {
+		_ = os.Remove(p.socketPath)
+	}
 	if p.cache != nil {
 		p.cache.Close()
 		p.cache = nil
@@ -212,9 +240,11 @@ func (p *Project) maybeEvict() {
 	}
 }
 
-// ensureHydrated rebuilds the in-memory index from the on-disk cache if it has
-// been evicted. Cheap relative to a full reparse — just JSON-decodes cached
-// tag rows and rebuilds the graph + PageRank.
+// ensureHydrated rebuilds the in-memory index if it has been evicted. The
+// watcher drops events while paused, so files may have changed since the
+// eviction: re-walk the tree and take each file from the cache only when its
+// mtime still matches (re-parsing the rest), rather than trusting every
+// cached row. Still cheap: one stat per file plus parses of changed files.
 func (p *Project) ensureHydrated() {
 	p.mu.RLock()
 	hydrated := p.index != nil
@@ -235,10 +265,7 @@ func (p *Project) ensureHydrated() {
 	if c == nil {
 		return
 	}
-	loaded, err := c.LoadAll()
-	if err != nil || loaded == nil {
-		loaded = make(map[string][]parser.Tag)
-	}
+	loaded := p.scanTree()
 	p.mu.Lock()
 	p.index = loaded
 	p.mu.Unlock()
@@ -257,6 +284,15 @@ func (p *Project) handleChanges(files []string) {
 	if len(files) == 0 {
 		return
 	}
+	p.mu.RLock()
+	evicted := p.index == nil
+	p.mu.RUnlock()
+	if evicted {
+		// A batch that was already queued when the project went idle.
+		// ensureHydrated re-scans the tree, so dropping it loses nothing
+		// (and writing into the nil map would panic).
+		return
+	}
 	start := time.Now()
 	if p.bus != nil {
 		p.bus.Emit(p.Root, "reindex_started", map[string]interface{}{
@@ -265,11 +301,19 @@ func (p *Project) handleChanges(files []string) {
 	}
 	for _, rel := range files {
 		rel = filepath.ToSlash(rel)
+		if !safefs.RelInside(rel) {
+			continue // never index (or join) a path that leaves the root
+		}
 		abs := filepath.Join(p.Root, rel)
 		if p.bus != nil {
 			p.bus.Emit(p.Root, "file_changed", map[string]interface{}{"file": rel})
 		}
-		info, err := os.Stat(abs)
+		// Lstat: a file replaced by a symlink (or FIFO, socket, device)
+		// is dropped from the index like a deleted one, never read.
+		info, err := os.Lstat(abs)
+		if err == nil && !info.IsDir() && !info.Mode().IsRegular() {
+			err = os.ErrNotExist
+		}
 		if err != nil {
 			// deleted
 			p.mu.Lock()
@@ -316,7 +360,21 @@ func (p *Project) handleChanges(files []string) {
 }
 
 func (p *Project) initialIndex() error {
-	return filepath.Walk(p.Root, func(path string, info os.FileInfo, err error) error {
+	idx := p.scanTree()
+	p.mu.Lock()
+	p.index = idx
+	p.mu.Unlock()
+	return nil
+}
+
+// scanTree walks the project and returns a fresh index, taking each file's
+// tags from the cache when its mtime matches and parsing it otherwise.
+// Symlinks (to files or directories) and other non-regular files are
+// skipped: filepath.Walk does not descend directory symlinks, and a file
+// symlink's target, if inside the project, is indexed under its own name.
+func (p *Project) scanTree() map[string][]parser.Tag {
+	idx := make(map[string][]parser.Tag)
+	_ = filepath.Walk(p.Root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -326,6 +384,9 @@ func (p *Project) initialIndex() error {
 			if rel != "." && p.matcher != nil && p.matcher.ShouldIgnore(path, true) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		if p.matcher != nil && p.matcher.ShouldIgnore(path, false) {
@@ -344,12 +405,11 @@ func (p *Project) initialIndex() error {
 			p.cache.Set(rel, mtime, tags)
 		}
 		if len(tags) > 0 {
-			p.mu.Lock()
-			p.index[rel] = tags
-			p.mu.Unlock()
+			idx[rel] = tags
 		}
 		return nil
 	})
+	return idx
 }
 
 func (p *Project) rebuildGraph() {

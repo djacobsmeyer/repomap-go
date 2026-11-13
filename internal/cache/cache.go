@@ -12,6 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/djacobsmeyer/repomap-go/internal/parser"
+	"github.com/djacobsmeyer/repomap-go/internal/safefs"
 )
 
 // Cache is a per-project on-disk tag cache.
@@ -25,11 +26,43 @@ type Cache struct {
 // meta.parser_version differs, every cached tag row is dropped so files are
 // re-parsed with the current parser instead of serving stale tags.
 func Open(projectRoot, version string) (*Cache, error) {
-	dir := filepath.Join(projectRoot, ".repomap")
+	return OpenDir(projectRoot, "", version)
+}
+
+// OpenDir is Open with an explicit cache directory (empty = the default
+// <projectRoot>/.repomap). The project tree may be writable by a less trusted
+// party than the daemon, so when the cache directory is inside the project
+// it must be a real directory reached without symlinks, and tags.db and its
+// SQLite side files must not be symlinks either: otherwise a planted
+// ".repomap -> elsewhere" would make the daemon create and write files
+// outside the project. A cache directory outside the project is the
+// operator's explicit choice and is used as given (its files are still
+// checked for symlinks).
+func OpenDir(projectRoot, dir, version string) (*Cache, error) {
+	if dir == "" {
+		dir = filepath.Join(projectRoot, ".repomap")
+	}
+	if inside(projectRoot, dir) {
+		if err := safefs.DirInside(projectRoot, dir); err != nil {
+			return nil, fmt.Errorf("cache dir: %w", err)
+		}
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir cache dir: %w", err)
 	}
+	if inside(projectRoot, dir) {
+		// Re-check after MkdirAll: it follows symlinks, so a link planted in
+		// the window is caught here before SQLite opens anything.
+		if err := safefs.DirInside(projectRoot, dir); err != nil {
+			return nil, fmt.Errorf("cache dir: %w", err)
+		}
+	}
 	dbPath := filepath.Join(dir, "tags.db")
+	for _, f := range []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal"} {
+		if safefs.IsSymlink(f) {
+			return nil, fmt.Errorf("cache file is a symlink, refusing: %s", f)
+		}
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -181,4 +214,10 @@ func (c *Cache) Close() error {
 	err := c.db.Close()
 	c.db = nil
 	return err
+}
+
+// inside reports whether dir is root or lexically below it.
+func inside(root, dir string) bool {
+	rel, err := filepath.Rel(root, dir)
+	return err == nil && (rel == "." || safefs.RelInside(rel))
 }

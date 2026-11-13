@@ -18,18 +18,36 @@ import (
 
 	"github.com/djacobsmeyer/repomap-go/internal/daemon"
 	"github.com/djacobsmeyer/repomap-go/internal/proxy"
+	"github.com/djacobsmeyer/repomap-go/internal/standalone"
 )
 
-const (
-	socketPath = daemon.DefaultSocketPath
-	pidPath    = daemon.DefaultPIDPath
+// Control socket and pidfile. Defaults are the historical fixed paths;
+// --socket/--pid-file (or REPOMAP_SOCKET/REPOMAP_PID_FILE) point every
+// subcommand at another daemon, e.g. a test daemon beside the user's.
+var (
+	socketPath = envOr("REPOMAP_SOCKET", daemon.DefaultSocketPath)
+	pidPath    = envOr("REPOMAP_PID_FILE", daemon.DefaultPIDPath)
 )
+
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
 
 func main() {
 	root := &cobra.Command{
 		Use:   "repomap",
 		Short: "Persistent repo-map daemon + MCP proxy",
+		PersistentPreRun: func(c *cobra.Command, args []string) {
+			proxy.ControlSocket = socketPath
+			proxy.ControlPIDFile = pidPath
+		},
 	}
+	root.PersistentFlags().StringVar(&socketPath, "socket", socketPath, "daemon control socket (env REPOMAP_SOCKET)")
+	root.PersistentFlags().StringVar(&pidPath, "pid-file", pidPath, "daemon pidfile (env REPOMAP_PID_FILE)")
+	root.AddCommand(socketCmd())
 
 	root.AddCommand(daemonCmd())
 	root.AddCommand(addCmd())
@@ -54,13 +72,29 @@ func daemonCmd() *cobra.Command {
 	}
 
 	var internal bool
+	var sseAddr, projectSocketDir string
+	var allowRoots []string
 	start := &cobra.Command{
 		Use:   "start",
 		Short: "Start the daemon in the background",
 		RunE: func(c *cobra.Command, args []string) error {
+			allowed := append(daemon.ParseRootList(os.Getenv("REPOMAP_ALLOWED_ROOTS")), allowRoots...)
+			for i, a := range allowed {
+				abs, err := filepath.Abs(a)
+				if err != nil {
+					return err
+				}
+				allowed[i] = abs
+			}
 			if internal {
 				// Foreground execution (used by the spawned background process).
-				d := daemon.New(daemon.Options{})
+				d := daemon.New(daemon.Options{
+					SocketPath:       socketPath,
+					PIDPath:          pidPath,
+					SSEAddr:          sseAddr,
+					AllowedRoots:     allowed,
+					ProjectSocketDir: projectSocketDir,
+				})
 				return d.Start(context.Background())
 			}
 			if pid, alive := daemon.IsRunning(pidPath); alive {
@@ -72,7 +106,20 @@ func daemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cmd := exec.Command(exe, "daemon", "start", "--internal")
+			childArgs := []string{"--socket", socketPath, "--pid-file", pidPath, "daemon", "start", "--internal"}
+			if sseAddr != "" {
+				childArgs = append(childArgs, "--sse-addr", sseAddr)
+			}
+			if projectSocketDir != "" {
+				childArgs = append(childArgs, "--project-socket-dir", projectSocketDir)
+			}
+			for _, a := range allowed {
+				childArgs = append(childArgs, "--allow-root", a)
+			}
+			cmd := exec.Command(exe, childArgs...)
+			// The child gets the allowlist as flags only, so an inherited
+			// REPOMAP_ALLOWED_ROOTS cannot widen or duplicate it.
+			cmd.Env = withoutEnv(os.Environ(), "REPOMAP_ALLOWED_ROOTS")
 			cmd.Stdout = nil
 			cmd.Stderr = nil
 			cmd.Stdin = nil
@@ -93,6 +140,9 @@ func daemonCmd() *cobra.Command {
 		},
 	}
 	start.Flags().BoolVar(&internal, "internal", false, "internal foreground mode (used by spawn)")
+	start.Flags().StringVar(&sseAddr, "sse-addr", "", "SSE listen address (default "+daemon.DefaultSSEAddr+")")
+	start.Flags().StringArrayVar(&allowRoots, "allow-root", nil, "only register projects at or below this directory (repeatable; also REPOMAP_ALLOWED_ROOTS, colon-separated). Default: any directory")
+	start.Flags().StringVar(&projectSocketDir, "project-socket-dir", "", "create per-project MCP sockets here (made 0700; must be private). Default: $TMPDIR")
 
 	stop := &cobra.Command{
 		Use:   "stop",
@@ -439,14 +489,78 @@ func runDoctor() {
 // --- mcp / events ------------------------------------------------------------
 
 func mcpCmd() *cobra.Command {
-	return &cobra.Command{
+	var standaloneMode bool
+	var cacheDir string
+	cmd := &cobra.Command{
 		Use:   "mcp <path>",
 		Short: "STDIO MCP proxy: bridge stdin/stdout to the daemon's per-project socket",
-		Args:  cobra.ExactArgs(1),
+		Long: "STDIO MCP proxy: bridge stdin/stdout to the daemon's per-project socket.\n\n" +
+			"With --standalone, index <path> in this process and serve MCP on stdin/stdout\n" +
+			"instead: no daemon, no sockets. Use this inside an OS sandbox (e.g. a Seatbelt\n" +
+			"profile for a coding agent) so repomap is confined exactly like the agent.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
+			if standaloneMode {
+				return standalone.Run(context.Background(), args[0], standalone.Options{CacheDir: cacheDir}, os.Stdin, os.Stdout)
+			}
+			if cacheDir != "" {
+				return fmt.Errorf("--cache-dir requires --standalone")
+			}
 			return proxy.Run(args[0])
 		},
 	}
+	cmd.Flags().BoolVar(&standaloneMode, "standalone", false, "index and serve in-process over stdio; never contact or start the daemon")
+	cmd.Flags().StringVar(&cacheDir, "cache-dir", "", "with --standalone: tag cache directory (default <path>/.repomap)")
+	return cmd
+}
+
+// socketCmd prints a project's per-project MCP socket, registering the
+// project if needed (mcp_connect). It never starts the daemon, so a caller
+// can tell "daemon down" (exit 3) from other failures (exit 1).
+func socketCmd() *cobra.Command {
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "socket <path>",
+		Short: "Print the per-project MCP socket for <path> (registers it; never starts the daemon)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			abs, err := filepath.Abs(args[0])
+			if err != nil {
+				return err
+			}
+			payload, _ := json.Marshal(map[string]string{"path": abs})
+			resp, err := daemon.SendMessageTimeout(socketPath, daemon.Message{Type: "mcp_connect", Payload: payload}, timeout)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "repomap: daemon not reachable at %s: %v\n", socketPath, err)
+				os.Exit(3)
+			}
+			if !resp.OK {
+				return fmt.Errorf("%s", resp.Error)
+			}
+			var data struct {
+				Socket string `json:"socket"`
+			}
+			if err := json.Unmarshal(resp.Data, &data); err != nil || data.Socket == "" {
+				return fmt.Errorf("daemon returned no socket path")
+			}
+			fmt.Println(data.Socket)
+			return nil
+		},
+	}
+	// mcp_connect indexes a new project synchronously before answering.
+	cmd.Flags().DurationVar(&timeout, "timeout", 120*time.Second, "how long to wait for the daemon (first registration indexes the project)")
+	return cmd
+}
+
+// withoutEnv returns env minus every NAME=... entry for name.
+func withoutEnv(env []string, name string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, name+"=") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 func eventsCmd() *cobra.Command {

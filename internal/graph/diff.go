@@ -98,10 +98,10 @@ func ParseDiff(diff string) map[string][]LineRange {
 // GitDiff shells out to `git diff <gitRef> HEAD --unified=0` in projectRoot.
 // gitRef is validated against a strict allow-list before execution.
 func GitDiff(projectRoot, gitRef string) (string, error) {
-	if !gitRefRE.MatchString(gitRef) {
+	if !ValidGitRef(gitRef) {
 		return "", fmt.Errorf("invalid git ref: %q", gitRef)
 	}
-	cmd := exec.Command("git", "diff", gitRef, "HEAD", "--unified=0")
+	cmd := exec.Command("git", GitDiffArgs(gitRef)...)
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
 	if err != nil {
@@ -241,4 +241,25 @@ func inAnyRange(line int, ranges []LineRange) bool {
 		}
 	}
 	return false
+}
+
+// ValidGitRef reports whether gitRef is safe to hand to git as a revision:
+// the gitRefRE character set, and no leading "-" (which git would parse as an
+// option: "--output" writes a file, "-O<path>" reads one).
+func ValidGitRef(gitRef string) bool {
+	return gitRef != "" && !strings.HasPrefix(gitRef, "-") && gitRefRE.MatchString(gitRef)
+}
+
+// GitDiffArgs is the argv (after "git") GitDiff runs. Options come first and
+// --end-of-options separates them from the revisions, so a ref can never be
+// read as an option even if validation changes. --no-ext-diff and
+// --no-textconv stop repo config (diff.external, textconv drivers named by an
+// in-tree .gitattributes) from running commands; core.fsmonitor is forced off
+// for the same reason. The repo's own config is otherwise still read.
+func GitDiffArgs(gitRef string) []string {
+	return []string{
+		"-c", "core.fsmonitor=false",
+		"diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0",
+		"--end-of-options", gitRef, "HEAD",
+	}
 }

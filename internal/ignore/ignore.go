@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/djacobsmeyer/repomap-go/internal/safefs"
 )
 
 // defaultIgnoreDirs is the set of directory basenames always excluded from
@@ -89,8 +91,10 @@ func New(root string) (*Matcher, error) {
 	m := &Matcher{root: root}
 
 	// .repomapignore at root, if present.
-	rmPath := filepath.Join(root, ".repomapignore")
-	if data, err := os.ReadFile(rmPath); err == nil {
+	// Ignore files are read through safefs like source files: a planted
+	// ".gitignore -> ~/secret" must not be read (its lines would become
+	// patterns, a weak oracle on the target's contents).
+	if data, err := safefs.ReadRegular(root, ".repomapignore", 1<<20); err == nil {
 		m.appendPatterns("", data)
 	}
 
@@ -115,7 +119,11 @@ func New(root string) (*Matcher, error) {
 		if info.Name() != ".gitignore" {
 			return nil
 		}
-		data, readErr := os.ReadFile(path)
+		relIgnore, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		data, readErr := safefs.ReadRegular(root, relIgnore, 1<<20)
 		if readErr != nil {
 			return nil
 		}

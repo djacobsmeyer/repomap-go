@@ -75,8 +75,15 @@ const (
 // HandleConn services one MCP client connection until EOF or error.
 func (s *Server) HandleConn(conn net.Conn) {
 	defer conn.Close()
-	dec := json.NewDecoder(conn)
-	enc := json.NewEncoder(conn)
+	s.ServeStream(conn, conn)
+}
+
+// ServeStream services newline-delimited JSON-RPC requests read from r,
+// writing responses to w, until r reaches EOF or a write fails. Used by
+// HandleConn (per-project socket) and the standalone stdio server.
+func (s *Server) ServeStream(r io.Reader, w io.Writer) {
+	dec := json.NewDecoder(r)
+	enc := json.NewEncoder(w)
 	for {
 		var req Request
 		if err := dec.Decode(&req); err != nil {

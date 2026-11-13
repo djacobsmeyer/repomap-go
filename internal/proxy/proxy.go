@@ -15,6 +15,13 @@ import (
 	"github.com/djacobsmeyer/repomap-go/internal/daemon"
 )
 
+// ControlSocket is the daemon control socket the proxy dials (the CLI sets
+// it from --socket / REPOMAP_SOCKET).
+var ControlSocket = daemon.DefaultSocketPath
+
+// ControlPIDFile is the pidfile passed to an auto-started daemon.
+var ControlPIDFile = daemon.DefaultPIDPath
+
 // Run is the entry point. It blocks until either end closes.
 func Run(projectRoot string) error {
 	abs, err := filepath.Abs(projectRoot)
@@ -86,7 +93,7 @@ func connectToProject(abs string) (string, error) {
 
 func sendMCPConnect(abs string) (string, error) {
 	payload, _ := json.Marshal(map[string]string{"path": abs})
-	resp, err := daemon.SendMessage(daemon.DefaultSocketPath, daemon.Message{
+	resp, err := daemon.SendMessage(ControlSocket, daemon.Message{
 		Type:    "mcp_connect",
 		Payload: payload,
 	})
@@ -117,7 +124,7 @@ func startDaemon() error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, "daemon", "start")
+	cmd := exec.Command(exe, "--socket", ControlSocket, "--pid-file", ControlPIDFile, "daemon", "start")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Stdin = nil

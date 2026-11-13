@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -73,6 +74,12 @@ type Daemon struct {
 	pidPath    string
 	sseAddr    string
 
+	// allowedRoots, when non-empty, limits add/mcp_connect to paths whose
+	// real path is one of these directories or below one (see RootAllowed).
+	allowedRoots []string
+	// projectSocketDir holds per-project sockets; empty = os.TempDir().
+	projectSocketDir string
+
 	listener  net.Listener
 	sseServer *http.Server
 
@@ -91,6 +98,18 @@ type Options struct {
 	PIDPath     string
 	SSEAddr     string
 	SSETimeouts SSETimeouts
+	// AllowedRoots, when non-empty, is the allowlist for add and
+	// mcp_connect: a project is registered only if its real path is one of
+	// these directories or inside one. Empty keeps the historical behavior
+	// (any absolute directory). Anyone who can reach the control socket can
+	// otherwise make this unconfined process index any directory the user
+	// can read, and read the result through that project's MCP socket.
+	AllowedRoots []string
+	// ProjectSocketDir is where per-project MCP sockets are created
+	// (empty = os.TempDir(), the historical location). Use a directory
+	// only this user can write (mode 0700) when less trusted local
+	// processes can write $TMPDIR.
+	ProjectSocketDir string
 }
 
 // New creates a Daemon ready to Start.
@@ -114,12 +133,14 @@ func New(opts Options) *Daemon {
 		opts.SSETimeouts.Idle = DefaultIdleTimeout
 	}
 	return &Daemon{
-		projects:    make(map[string]*project.Project),
-		bus:         events.NewBus(),
-		socketPath:  opts.SocketPath,
-		pidPath:     opts.PIDPath,
-		sseAddr:     opts.SSEAddr,
-		sseTimeouts: opts.SSETimeouts,
+		projects:         make(map[string]*project.Project),
+		bus:              events.NewBus(),
+		socketPath:       opts.SocketPath,
+		pidPath:          opts.PIDPath,
+		sseAddr:          opts.SSEAddr,
+		sseTimeouts:      opts.SSETimeouts,
+		allowedRoots:     opts.AllowedRoots,
+		projectSocketDir: opts.ProjectSocketDir,
 	}
 }
 
@@ -154,6 +175,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 	// single-instance resource.
 	if err := d.checkSocketOwnership(); err != nil {
 		return err
+	}
+	if d.projectSocketDir != "" {
+		if err := EnsurePrivateDir(d.projectSocketDir); err != nil {
+			return fmt.Errorf("project socket dir: %w", err)
+		}
 	}
 	if err := d.writePID(); err != nil {
 		return err
@@ -447,6 +473,11 @@ func (d *Daemon) AddProject(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	if ok, err := RootAllowed(d.allowedRoots, abs); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("not in allowed roots: %s", abs)
+	}
 	d.mu.Lock()
 	if _, exists := d.projects[abs]; exists {
 		d.mu.Unlock()
@@ -458,6 +489,7 @@ func (d *Daemon) AddProject(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	p.SetSocketDir(d.projectSocketDir)
 	// Wire MCP server for this project before starting the listener so the
 	// per-project socket accepts connections with a real handler attached.
 	mcpServer := mcp.New(abs, p)
@@ -526,6 +558,72 @@ func (d *Daemon) Status() map[string]interface{} {
 		"control_socket": d.socketPath,
 		"sse_addr":       d.sseAddr,
 	}
+}
+
+// RootAllowed reports whether path may be registered under the allowlist
+// allowed. An empty allowlist allows everything (historical behavior).
+// Otherwise path's real path (symlinks resolved, so a link inside an allowed
+// root that points elsewhere does not pass) must equal, or be below, the real
+// path of an allowed root. A path that cannot be resolved is refused.
+func RootAllowed(allowed []string, path string) (bool, error) {
+	if len(allowed) == 0 {
+		return true, nil
+	}
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s: %w", path, err)
+	}
+	for _, a := range allowed {
+		if a == "" || !filepath.IsAbs(a) {
+			continue
+		}
+		ar, err := filepath.EvalSymlinks(a)
+		if err != nil {
+			continue
+		}
+		if real == ar || strings.HasPrefix(real, ar+string(filepath.Separator)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// EnsurePrivateDir creates dir (mode 0700) if missing and refuses one that
+// is a symlink, not a directory, not owned by this user, or writable by group
+// or others: per-project sockets in it must not be replaceable by anyone else.
+func EnsurePrivateDir(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("not absolute: %s", dir)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("not a real directory: %s", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("not owned by uid %d: %s", os.Getuid(), dir)
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("writable by group or others (mode %o): %s", fi.Mode().Perm(), dir)
+	}
+	return nil
+}
+
+// ParseRootList splits a colon-separated list (REPOMAP_ALLOWED_ROOTS),
+// dropping empty entries.
+func ParseRootList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, string(os.PathListSeparator)) {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func okResp(v interface{}) Response {

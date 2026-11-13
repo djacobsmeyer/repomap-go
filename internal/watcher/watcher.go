@@ -10,6 +10,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/djacobsmeyer/repomap-go/internal/ignore"
+	"github.com/djacobsmeyer/repomap-go/internal/safefs"
 )
 
 // Watcher recursively watches a directory tree and emits debounced batches of
@@ -147,12 +148,17 @@ func (w *Watcher) run() {
 			if !ok {
 				return
 			}
-			rel, err := filepath.Rel(w.root, ev.Name)
-			if err != nil {
+			rel, ok := w.relInside(ev.Name)
+			if !ok {
+				// fsnotify's kqueue backend follows symlinks when it adds
+				// per-file watches, so an event can name the link's target
+				// outside the root. Never pass such a path on.
 				continue
 			}
-			// Stat once — we need both the type and ignore check.
-			info, statErr := os.Stat(ev.Name)
+			// Lstat once — we need both the type and ignore check. Lstat,
+			// not Stat: a symlink to a directory must not be descended
+			// into, and a symlink to a file is not indexed.
+			info, statErr := os.Lstat(ev.Name)
 			isDir := statErr == nil && info.IsDir()
 			if w.isIgnored(ev.Name, isDir) {
 				continue
@@ -181,6 +187,16 @@ func (w *Watcher) run() {
 			}
 		}
 	}
+}
+
+// relInside maps an event path to a root-relative path, refusing anything
+// that is not lexically inside the root.
+func (w *Watcher) relInside(name string) (string, bool) {
+	rel, err := filepath.Rel(w.root, name)
+	if err != nil || !safefs.RelInside(rel) {
+		return "", false
+	}
+	return rel, true
 }
 
 // Close stops the watcher and releases resources.
