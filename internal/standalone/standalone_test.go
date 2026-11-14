@@ -93,3 +93,41 @@ func TestStandaloneServesOverStdioWithoutReadingOutside(t *testing.T) {
 		t.Fatalf("cache not written to CacheDir: %v", err)
 	}
 }
+
+func TestStandaloneAgentMode(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "app.py"), []byte("def app_main():\n    helper()\n\ndef helper():\n    pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"callers","arguments":{"symbol":"helper"}}}`,
+	}, "\n") + "\n"
+	var out strings.Builder
+	err := Run(context.Background(), root, Options{CacheDir: filepath.Join(root, ".cache"), Agent: true}, strings.NewReader(in), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want 3 responses, got %d: %s", len(lines), out.String())
+	}
+	if !strings.Contains(lines[0], `"instructions"`) {
+		t.Errorf("initialize lacks instructions: %s", lines[0])
+	}
+	for _, name := range []string{`"callers"`, `"outline"`, `"search"`} {
+		if !strings.Contains(lines[1], name) {
+			t.Errorf("tools/list lacks %s", name)
+		}
+	}
+	if strings.Contains(lines[1], `"find_dead_code"`) {
+		t.Error("agent default must not list the legacy tools")
+	}
+	if !strings.Contains(lines[2], "app.py:2 in app_main [1-2]") {
+		t.Errorf("callers answer: %s", lines[2])
+	}
+	if err := Run(context.Background(), root, Options{Agent: true, Tools: []string{"bogus"}}, strings.NewReader(""), &out); err == nil {
+		t.Error("an unknown --tools name must fail before serving")
+	}
+}

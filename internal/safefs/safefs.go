@@ -62,44 +62,13 @@ func ReadRegular(root, rel string, max int64) ([]byte, error) {
 	if max <= 0 {
 		max = MaxFileBytes
 	}
-	if !RelInside(rel) {
-		return nil, ErrOutside
-	}
-	rel = filepath.FromSlash(rel)
-	r, err := os.OpenRoot(root)
+	f, size, err := openRegular(root, rel)
 	if err != nil {
 		return nil, err
-	}
-	defer r.Close()
-
-	li, err := r.Lstat(rel)
-	if err != nil {
-		return nil, mapRootErr(err)
-	}
-	if li.Mode()&fs.ModeSymlink != 0 {
-		return nil, ErrSymlink
-	}
-	if !li.Mode().IsRegular() {
-		return nil, ErrNotRegular
-	}
-	if li.Size() > max {
-		return nil, ErrTooLarge
-	}
-
-	f, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, mapRootErr(err)
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, ErrNotRegular
-	}
-	if !os.SameFile(li, fi) {
-		return nil, ErrChanged
+	if size > max {
+		return nil, ErrTooLarge
 	}
 	// Read at most max+1 bytes: a file that grew past the cap after the
 	// Lstat is still refused instead of being read without bound.
@@ -111,6 +80,63 @@ func ReadRegular(root, rel string, max int64) ([]byte, error) {
 		return nil, ErrTooLarge
 	}
 	return data, nil
+}
+
+// ReadHead returns at most the first n bytes of root/rel, with the same
+// checks as ReadRegular except the size cap: it is used to sniff a shebang
+// line, so a large file costs one short read, not a full one.
+func ReadHead(root, rel string, n int) ([]byte, error) {
+	f, _, err := openRegular(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, int64(n)))
+}
+
+// openRegular opens root/rel for reading if and only if rel is inside root
+// and its final component is a regular file (see ReadRegular). It returns
+// the open file and its Lstat size; the caller closes the file.
+func openRegular(root, rel string) (*os.File, int64, error) {
+	if !RelInside(rel) {
+		return nil, 0, ErrOutside
+	}
+	rel = filepath.FromSlash(rel)
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer r.Close()
+
+	li, err := r.Lstat(rel)
+	if err != nil {
+		return nil, 0, mapRootErr(err)
+	}
+	if li.Mode()&fs.ModeSymlink != 0 {
+		return nil, 0, ErrSymlink
+	}
+	if !li.Mode().IsRegular() {
+		return nil, 0, ErrNotRegular
+	}
+
+	f, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, 0, mapRootErr(err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, 0, ErrNotRegular
+	}
+	if !os.SameFile(li, fi) {
+		f.Close()
+		return nil, 0, ErrChanged
+	}
+	return f, li.Size(), nil
 }
 
 // IsSymlink reports whether path itself (not its target) is a symlink.

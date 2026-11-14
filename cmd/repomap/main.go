@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/djacobsmeyer/repomap-go/internal/daemon"
+	"github.com/djacobsmeyer/repomap-go/internal/mcp"
 	"github.com/djacobsmeyer/repomap-go/internal/proxy"
 	"github.com/djacobsmeyer/repomap-go/internal/standalone"
 )
@@ -54,6 +55,7 @@ func main() {
 	root.AddCommand(removeCmd())
 	root.AddCommand(listCmd())
 	root.AddCommand(mcpCmd())
+	root.AddCommand(hintCmd())
 	root.AddCommand(eventsCmd())
 	root.AddCommand(doctorCmd())
 
@@ -489,29 +491,55 @@ func runDoctor() {
 // --- mcp / events ------------------------------------------------------------
 
 func mcpCmd() *cobra.Command {
-	var standaloneMode bool
-	var cacheDir string
+	var standaloneMode, agentMode bool
+	var cacheDir, tools string
 	cmd := &cobra.Command{
 		Use:   "mcp <path>",
 		Short: "STDIO MCP proxy: bridge stdin/stdout to the daemon's per-project socket",
 		Long: "STDIO MCP proxy: bridge stdin/stdout to the daemon's per-project socket.\n\n" +
 			"With --standalone, index <path> in this process and serve MCP on stdin/stdout\n" +
 			"instead: no daemon, no sockets. Use this inside an OS sandbox (e.g. a Seatbelt\n" +
-			"profile for a coding agent) so repomap is confined exactly like the agent.",
+			"profile for a coding agent) so repomap is confined exactly like the agent.\n\n" +
+			"--agent (with --standalone) serves the surface for small-context agents:\n" +
+			"callers, outline and search, with short schemas and plain-text answers\n" +
+			"inside a max_tokens budget. --tools picks the tools to expose (comma list;\n" +
+			"agent mode also accepts the original five). `repomap hint` prints a usage\n" +
+			"note to put in the agent's brief.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			if standaloneMode {
-				return standalone.Run(context.Background(), args[0], standalone.Options{CacheDir: cacheDir}, os.Stdin, os.Stdout)
+			var toolList []string
+			if tools != "" {
+				toolList = strings.Split(tools, ",")
 			}
-			if cacheDir != "" {
-				return fmt.Errorf("--cache-dir requires --standalone")
+			if standaloneMode {
+				return standalone.Run(context.Background(), args[0], standalone.Options{
+					CacheDir: cacheDir, Agent: agentMode, Tools: toolList,
+				}, os.Stdin, os.Stdout)
+			}
+			if cacheDir != "" || agentMode || tools != "" {
+				return fmt.Errorf("--cache-dir, --agent and --tools require --standalone")
 			}
 			return proxy.Run(args[0])
 		},
 	}
 	cmd.Flags().BoolVar(&standaloneMode, "standalone", false, "index and serve in-process over stdio; never contact or start the daemon")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", "", "with --standalone: tag cache directory (default <path>/.repomap)")
+	cmd.Flags().BoolVar(&agentMode, "agent", false, "with --standalone: compact tools for small-context agents (callers, outline, search)")
+	cmd.Flags().StringVar(&tools, "tools", "", "with --standalone: comma-separated tools to expose (default: all; with --agent: callers,outline,search)")
 	return cmd
+}
+
+// hintCmd prints the agent-mode usage note (mcp.AgentHint), for a wrapper to
+// put in an agent's brief so the tool descriptions can stay short.
+func hintCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "hint",
+		Short: "Print a short usage note for agents using `mcp --standalone --agent`",
+		Args:  cobra.NoArgs,
+		Run: func(c *cobra.Command, args []string) {
+			fmt.Println(mcp.AgentHint)
+		},
+	}
 }
 
 // socketCmd prints a project's per-project MCP socket, registering the

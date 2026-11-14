@@ -88,6 +88,77 @@ func FilenameToLang(path string) string {
 	return ""
 }
 
+// shebangHeadBytes is how much of an extensionless file is read to look
+// for a "#!" line.
+const shebangHeadBytes = 256
+
+// MaybeSource reports whether relpath can hold indexable source: either its
+// name maps to a language (FilenameToLang), or it has no extension and so
+// may be a script whose language only its shebang line names (agent-queue,
+// verify-run, ...). Dotfiles (".bashrc", ".env") never count.
+func MaybeSource(relpath string) bool {
+	if FilenameToLang(relpath) != "" {
+		return true
+	}
+	base := filepath.Base(relpath)
+	return filepath.Ext(base) == "" && !strings.HasPrefix(base, ".")
+}
+
+// ShebangLang returns the language named by a "#!" first line, or "" if
+// head has none or names an interpreter repomap has no parser for. It
+// accepts "#!/usr/bin/python3", "#!/usr/bin/env python3", "#!/usr/bin/env
+// -S python3 -u" and versioned names such as "python3.12" or "node20".
+func ShebangLang(head []byte) string {
+	if len(head) < 3 || head[0] != '#' || head[1] != '!' {
+		return ""
+	}
+	line := string(head[2:])
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	interp := filepath.Base(fields[0])
+	if interp == "env" {
+		interp = ""
+		for _, f := range fields[1:] {
+			if strings.HasPrefix(f, "-") || strings.Contains(f, "=") {
+				continue // env options (-S, -i) and VAR=value assignments
+			}
+			interp = filepath.Base(f)
+			break
+		}
+	}
+	name := strings.TrimRight(interp, "0123456789.")
+	switch name {
+	case "python", "pypy":
+		return "python"
+	case "node", "nodejs", "bun":
+		return "javascript"
+	case "deno", "ts-node", "tsx":
+		return "typescript"
+	}
+	return ""
+}
+
+// detectLang returns the language of root/relpath: by name first, then, for
+// an extensionless file, by its shebang line.
+func detectLang(root, relpath string) string {
+	if lang := FilenameToLang(relpath); lang != "" {
+		return lang
+	}
+	if !MaybeSource(relpath) {
+		return ""
+	}
+	head, err := safefs.ReadHead(root, relpath, shebangHeadBytes)
+	if err != nil {
+		return ""
+	}
+	return ShebangLang(head)
+}
+
 // SCM queries — minimum viable defs + refs per language.
 const tsQuery = `
 (function_declaration name: (identifier) @name.definition.function)
@@ -508,7 +579,7 @@ func compiledQueryFor(lang string, tsLang *sitter.Language, queryStr string) (q 
 // and returns the extracted tags. On any soft error (parse failure, query
 // failure) it returns an empty slice without surfacing the error.
 func ParseFile(root, relpath string) ([]Tag, error) {
-	lang := FilenameToLang(relpath)
+	lang := detectLang(root, relpath)
 	if lang == "" {
 		return nil, nil
 	}

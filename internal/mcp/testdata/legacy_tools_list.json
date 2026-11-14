@@ -1,0 +1,178 @@
+[
+ {
+  "description": "Returns a ranked structural map of the codebase. Definitions only, sorted by PageRank.",
+  "inputSchema": {
+   "properties": {
+    "chat_files": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "force_refresh": {
+     "default": false,
+     "type": "boolean"
+    },
+    "map_tokens": {
+     "default": 8192,
+     "type": "integer"
+    },
+    "project_root": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "project_root"
+   ],
+   "type": "object"
+  },
+  "name": "repo_map"
+ },
+ {
+  "description": "Search for function/class/variable definitions or references by name.",
+  "inputSchema": {
+   "properties": {
+    "filter": {
+     "default": "both",
+     "enum": [
+      "defs",
+      "refs",
+      "both"
+     ],
+     "type": "string"
+    },
+    "kinds": {
+     "description": "Filter by symbol kind: function, method, class, interface, type, variable, constant, def, ref",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "limit": {
+     "default": 50,
+     "type": "integer"
+    },
+    "project_root": {
+     "type": "string"
+    },
+    "query": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "project_root",
+    "query"
+   ],
+   "type": "object"
+  },
+  "name": "search_identifiers"
+ },
+ {
+  "description": "Returns every file and symbol that transitively depends on the given symbol. Use before renaming or deleting anything.",
+  "inputSchema": {
+   "properties": {
+    "depth": {
+     "default": 3,
+     "description": "Max traversal depth (1-10)",
+     "type": "integer"
+    },
+    "file": {
+     "description": "Optional: narrow to a specific definition file when symbol is overloaded",
+     "type": "string"
+    },
+    "project_root": {
+     "type": "string"
+    },
+    "symbol": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "project_root",
+    "symbol"
+   ],
+   "type": "object"
+  },
+  "name": "get_blast_radius"
+ },
+ {
+  "description": "Returns symbols defined but never referenced in the project, and files with no importers. For actionable results, combine unexported_only: true with kinds: [\"function\",\"method\",\"class\"] \u2014 exported symbols and reflection-called code produce false positives, and module-level variables/constants are rarely worth deleting; add \"variable\"/\"constant\" to kinds only if you specifically want them. orphan_files hides test and docs files by default (they legitimately have no importers); each orphan carries lang and category (source|test|docs), and include_test_orphans / include_doc_orphans reveal the hidden ones. dead_symbols carries category (source|test|docs); symbols defined in test files (test runners discover them, so they are never referenced by name) are hidden by default \u2014 set include_test_symbols to reveal them.",
+  "inputSchema": {
+   "properties": {
+    "exported_only": {
+     "default": false,
+     "description": "Only return exported/public symbols. High false-positive rate \u2014 external callers are invisible to static analysis.",
+     "type": "boolean"
+    },
+    "include_doc_orphans": {
+     "default": false,
+     "description": "Also list markdown/docs files in orphan_files. Hidden by default because nothing imports a doc.",
+     "type": "boolean"
+    },
+    "include_test_orphans": {
+     "default": false,
+     "description": "Also list test files (test_*.py, *_test.go, *.spec.ts, tests/ dirs\u2026) in orphan_files. Hidden by default because test files legitimately have no importers.",
+     "type": "boolean"
+    },
+    "include_test_symbols": {
+     "default": false,
+     "description": "Also list dead symbols defined in test files (e.g. pytest test_* functions, Go TestXxx). Hidden by default because test functions are discovered by the runner and never referenced by name.",
+     "type": "boolean"
+    },
+    "kinds": {
+     "description": "Filter by symbol kind: function, method, class, interface, type, variable, constant, def, ref. For Python, \"variable\" means module- or class-level assignments only \u2014 function locals are never tagged.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "min_rank": {
+     "default": 0.001,
+     "description": "Only files with PageRank at or below this value can be listed in orphan_files; higher-ranked files are excluded because hubs and entry points legitimately attract references. Default 0.001.",
+     "type": "number"
+    },
+    "project_root": {
+     "type": "string"
+    },
+    "unexported_only": {
+     "default": false,
+     "description": "Only return unexported/private symbols. Best signal-to-noise for actionable dead code.",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "project_root"
+   ],
+   "type": "object"
+  },
+  "name": "find_dead_code"
+ },
+ {
+  "description": "Given a git ref or unified diff, returns the symbols whose definitions fall within changed line ranges. Definitions carry a span (definition line through their closing line), so a change inside a function or class body is attributed to the innermost enclosing definition. Each result carries a reason field: \"definition\" when a changed range touches the definition line itself, \"body\" when the change falls only inside the definition's body. Optionally includes blast radius for each changed symbol.",
+  "inputSchema": {
+   "properties": {
+    "diff": {
+     "description": "Raw unified diff text. Use this OR git_ref, not both.",
+     "type": "string"
+    },
+    "git_ref": {
+     "description": "Git ref to diff against HEAD (e.g. 'HEAD~1', 'main'). Use this OR diff, not both.",
+     "type": "string"
+    },
+    "include_blast_radius": {
+     "default": false,
+     "description": "Also compute blast radius for each changed symbol (slower)",
+     "type": "boolean"
+    },
+    "project_root": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "project_root"
+   ],
+   "type": "object"
+  },
+  "name": "get_changed_symbols"
+ }
+]

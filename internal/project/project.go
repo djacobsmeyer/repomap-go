@@ -27,8 +27,12 @@ import (
 type Project struct {
 	Root string
 
-	mu      sync.RWMutex
-	index   map[string][]parser.Tag
+	mu    sync.RWMutex
+	index map[string][]parser.Tag
+	// files is every regular, non-ignored file under Root (rel path ->
+	// size), parsed or not. Agent queries grep the unparsed ones so a
+	// reference in a shell script or config file is not silently missed.
+	files   map[string]int64
 	graph   *graph.FileGraph
 	ranks   map[string]float32
 	cache   *cache.Cache
@@ -69,6 +73,7 @@ func New(root string, bus *events.Bus) (*Project, error) {
 	return &Project{
 		Root:       abs,
 		index:      make(map[string][]parser.Tag),
+		files:      make(map[string]int64),
 		bus:        bus,
 		socketPath: sock,
 		done:       make(chan struct{}),
@@ -226,6 +231,7 @@ func (p *Project) maybeEvict() {
 		return // already evicted
 	}
 	p.index = nil
+	p.files = nil
 	p.graph = nil
 	p.ranks = nil
 	w := p.watcher
@@ -265,9 +271,10 @@ func (p *Project) ensureHydrated() {
 	if c == nil {
 		return
 	}
-	loaded := p.scanTree()
+	loaded, files := p.scanTree()
 	p.mu.Lock()
 	p.index = loaded
+	p.files = files
 	p.mu.Unlock()
 	p.rebuildGraph()
 	if w != nil {
@@ -318,6 +325,7 @@ func (p *Project) handleChanges(files []string) {
 			// deleted
 			p.mu.Lock()
 			delete(p.index, rel)
+			delete(p.files, rel)
 			p.mu.Unlock()
 			if p.cache != nil {
 				p.cache.Invalidate(rel)
@@ -327,7 +335,12 @@ func (p *Project) handleChanges(files []string) {
 		if info.IsDir() {
 			continue
 		}
-		if parser.FilenameToLang(rel) == "" {
+		p.mu.Lock()
+		if p.files != nil {
+			p.files[rel] = info.Size()
+		}
+		p.mu.Unlock()
+		if !parser.MaybeSource(rel) {
 			continue
 		}
 		mtime := info.ModTime().UnixNano()
@@ -360,9 +373,10 @@ func (p *Project) handleChanges(files []string) {
 }
 
 func (p *Project) initialIndex() error {
-	idx := p.scanTree()
+	idx, files := p.scanTree()
 	p.mu.Lock()
 	p.index = idx
+	p.files = files
 	p.mu.Unlock()
 	return nil
 }
@@ -372,8 +386,9 @@ func (p *Project) initialIndex() error {
 // Symlinks (to files or directories) and other non-regular files are
 // skipped: filepath.Walk does not descend directory symlinks, and a file
 // symlink's target, if inside the project, is indexed under its own name.
-func (p *Project) scanTree() map[string][]parser.Tag {
+func (p *Project) scanTree() (map[string][]parser.Tag, map[string]int64) {
 	idx := make(map[string][]parser.Tag)
+	files := make(map[string]int64)
 	_ = filepath.Walk(p.Root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -392,7 +407,8 @@ func (p *Project) scanTree() map[string][]parser.Tag {
 		if p.matcher != nil && p.matcher.ShouldIgnore(path, false) {
 			return nil
 		}
-		if parser.FilenameToLang(rel) == "" {
+		files[rel] = info.Size()
+		if !parser.MaybeSource(rel) {
 			return nil
 		}
 		mtime := info.ModTime().UnixNano()
@@ -409,7 +425,7 @@ func (p *Project) scanTree() map[string][]parser.Tag {
 		}
 		return nil
 	})
-	return idx
+	return idx, files
 }
 
 func (p *Project) rebuildGraph() {
@@ -585,6 +601,36 @@ func (p *Project) ChangedSymbols(diff, gitRef string, includeBlastRadius bool) g
 		p.bus.Emit(p.Root, "mcp_call", map[string]interface{}{"tool": "get_changed_symbols"})
 	}
 	return res
+}
+
+// IndexSnapshot returns a copy of the tag index, the PageRank of each indexed
+// file, and every regular non-ignored file with its size (parsed or not),
+// for the agent queries in internal/agentq. The tag slices are shared, not
+// copied: callers must not modify them.
+func (p *Project) IndexSnapshot() (map[string][]parser.Tag, map[string]float32, map[string]int64) {
+	p.ensureHydrated()
+	p.touchMCP()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	idx := make(map[string][]parser.Tag, len(p.index))
+	for k, v := range p.index {
+		idx[k] = v
+	}
+	ranks := make(map[string]float32, len(p.ranks))
+	for k, v := range p.ranks {
+		ranks[k] = v
+	}
+	files := make(map[string]int64, len(p.files))
+	for k, v := range p.files {
+		files[k] = v
+	}
+	return idx, ranks, files
+}
+
+// ReadSource returns the contents of a project file through safefs (never a
+// symlink, never outside Root, at most safefs.MaxFileBytes).
+func (p *Project) ReadSource(rel string) ([]byte, error) {
+	return safefs.ReadRegular(p.Root, rel, 0)
 }
 
 // MemoryEstimateBytes returns a rough heap-cost estimate for this project.

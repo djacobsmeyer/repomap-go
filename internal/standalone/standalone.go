@@ -20,6 +20,9 @@ import (
 type Options struct {
 	// CacheDir is the tag-cache directory (empty = <root>/.repomap).
 	CacheDir string
+	// Agent and Tools select the tool surface; see mcp.Options.
+	Agent bool
+	Tools []string
 }
 
 // Run indexes root, then serves MCP on in/out until in reaches EOF. The
@@ -42,6 +45,11 @@ func Run(ctx context.Context, root string, opts Options, in io.Reader, out io.Wr
 	if err != nil {
 		return err
 	}
+	// Build the server first so a bad --tools fails before indexing.
+	srv, err := mcp.NewWithOptions(abs, p, mcp.Options{Agent: opts.Agent, Tools: opts.Tools})
+	if err != nil {
+		return err
+	}
 	p.DisableSocket()
 	if opts.CacheDir != "" {
 		cd, err := filepath.Abs(opts.CacheDir)
@@ -55,6 +63,6 @@ func Run(ctx context.Context, root string, opts Options, in io.Reader, out io.Wr
 	}
 	defer p.Stop()
 
-	mcp.New(abs, p).ServeStream(in, out)
+	srv.ServeStream(in, out)
 	return nil
 }

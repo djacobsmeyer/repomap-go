@@ -146,6 +146,9 @@ repomap list                  # all active projects, index size, last reindex ti
 repomap mcp ~/code/api        # STDIO proxy — invoked by Claude Code
 repomap mcp --standalone ~/code/api [--cache-dir DIR]
                               # index + serve MCP in this process over stdio; no daemon, no sockets
+repomap mcp --standalone ~/code/api --agent [--tools callers,outline]
+                              # the small-context agent surface (see "Agent mode" below)
+repomap hint                  # print the agent-mode usage note for an agent's brief
 repomap socket ~/code/api     # print the project's MCP socket (registers it; never starts the daemon; exit 3 if down)
 repomap events                # pretty-print SSE stream to terminal
 
@@ -166,6 +169,38 @@ server *inside* the same sandbox: it builds the index in-process, watches the tr
 answers on stdin/stdout and exits on EOF, so every file it reads and writes is
 confined exactly like the agent's own tools. The sandbox needs to allow reading
 (executing) the repomap binary and writing the cache dir; it needs no socket.
+
+### Agent mode (`--agent`, with `--standalone`)
+
+For agents with a small context budget (local models, 15-25k tokens per job). The
+default surface is unchanged; `--agent` serves a different one:
+
+- **Three tools, ~420 schema tokens** (the five default tools cost ~1,260 on every
+  turn): `callers`, `outline`, `search`. No `project_root` parameter (the server is
+  bound to one root). `--tools a,b` picks a subset; in agent mode it also accepts the
+  original five, with short descriptions (`get_blast_radius` then answers like
+  `callers depth=2`, and `full: true` returns the old JSON graph).
+- **Plain-text answers an agent can act on without reading files**, each within a
+  `max_tokens` budget (defaults 1500/1200/600; tokens estimated for Qwen-style
+  tokenizers) and ending in `[truncated ...]` when cut; totals are always printed first.
+  - `callers symbol [depth 1-3] [context 0-3] [include_tests] [path] [file]`: every
+    reference with `file:line`, the enclosing function and its line range, and the line
+    itself; whole-word matches in files repomap does not parse (shell, YAML, ...);
+    other mentions in parsed files (imports, strings, comments) as `file: lines`.
+    `depth=2` adds the references to the enclosing functions (a constructor's to its
+    class). When several files define a name, a file's own definition and a `mod.name`
+    qualifier decide where a reference belongs; a method name other classes share is
+    followed only in its own file or as `Class.name`.
+  - `outline [path] [all] [include_tests]`: a file's definitions, nested, with line
+    ranges (pick a range before a ranged read), or for a directory each file's line count
+    and top-level definitions, highest PageRank first.
+  - `search query [refs]`: definitions by name (exact, then prefix, then substring).
+- Numbers and booleans may be sent as strings (`"depth": "2"`), as some agents do.
+- `repomap hint` prints a ~130-token usage note to put in the agent's brief; it is also
+  sent as the MCP `instructions` field.
+
+Extensionless scripts with a `python`/`node`/`deno` shebang (e.g. `bin/agent-queue`)
+are now indexed in every mode.
 
 ## MCP tools
 

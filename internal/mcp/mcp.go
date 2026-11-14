@@ -33,6 +33,10 @@ type ProjectAccessor interface {
 type Server struct {
 	root    string
 	project ProjectAccessor
+	// agent selects the small-context surface (see Options.Agent).
+	agent bool
+	// enabled, if non-nil, is the set of tools listed and callable.
+	enabled map[string]bool
 }
 
 // New constructs a Server bound to a project at the given absolute root.
@@ -148,15 +152,26 @@ func (s *Server) dispatch(req Request) Response {
 // --- initialize / tools list -------------------------------------------------
 
 func (s *Server) initializeResult() map[string]any {
-	return map[string]any{
+	res := map[string]any{
 		"protocolVersion": MCPVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{}, "prompts": map[string]any{}},
 		"serverInfo":      map[string]any{"name": "repomap", "version": "0.1.0"},
 		"tools":           s.toolsList(),
 	}
+	if s.agent {
+		res["instructions"] = AgentHint
+	}
+	return res
 }
 
 func (s *Server) toolsList() []map[string]any {
+	if s.agent {
+		return s.agentToolsList()
+	}
+	return s.filterTools(s.legacyToolsList())
+}
+
+func (s *Server) legacyToolsList() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "repo_map",
@@ -247,6 +262,26 @@ func (s *Server) handleToolCall(raw json.RawMessage) (any, *RPCError) {
 	var call toolCallParams
 	if err := json.Unmarshal(raw, &call); err != nil {
 		return nil, &RPCError{Code: codeInvalidParams, Message: err.Error()}
+	}
+	if !s.toolEnabled(call.Name) {
+		return nil, &RPCError{Code: codeMethodNotFound, Message: "unknown tool: " + call.Name}
+	}
+	if s.agent {
+		switch call.Name {
+		case "callers":
+			return s.agentCallers(call.Arguments, 1, false)
+		case "get_blast_radius":
+			return s.agentCallers(call.Arguments, 2, true)
+		case "outline":
+			return s.agentOutline(call.Arguments)
+		case "search":
+			return s.agentSearch(call.Arguments)
+		}
+		args, rpcErr := agentLegacyArgs(call.Name, call.Arguments)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		call.Arguments = args
 	}
 	switch call.Name {
 	case "repo_map":
